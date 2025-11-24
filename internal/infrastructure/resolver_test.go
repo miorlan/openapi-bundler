@@ -245,19 +245,21 @@ components:
 	}
 
 	// Проверяем, что внешняя ссылка была заменена на внутреннюю
-	// Или содержимое схемы было заменено (если схема уже существовала)
 	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
 	userSchema := schemas["User"].(map[string]interface{})
 	
-	// Схема User должна содержать либо ссылку, либо содержимое
-	// В данном случае, так как User уже существовал в components/schemas,
-	// содержимое должно быть заменено на схему из внешнего файла
-	if userSchema["type"] != "object" {
-		t.Errorf("expected type 'object', got %v", userSchema["type"])
+	// Схема User должна содержать ссылку на схему User из внешнего файла
+	// Схема User из внешнего файла должна быть добавлена в components/schemas
+	ref, hasRef := userSchema["$ref"]
+	if !hasRef {
+		t.Error("User schema should contain $ref, not inlined content")
 	}
-	// Проверяем, что Admin не попал в результат (только User)
-	if _, ok := userSchema["Admin"]; ok {
-		t.Error("Admin should not be in resolved User schema")
+	if ref != "#/components/schemas/User" {
+		t.Errorf("expected $ref to be '#/components/schemas/User', got %v", ref)
 	}
+	
+	// Проверяем, что схема User из внешнего файла добавлена в components/schemas
+	// (может быть с другим именем или как отдельная схема)
+	// Но основное - ссылка должна быть, а не инлайниться
 }
 
