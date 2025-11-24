@@ -17,6 +17,7 @@ type ReferenceResolver struct {
 	rootDoc    map[string]interface{}
 	schemas    map[string]interface{}
 	schemaRefs map[string]string
+	schemaCounter int
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
@@ -26,6 +27,7 @@ func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) do
 		visited:    make(map[string]bool),
 		schemas:    make(map[string]interface{}),
 		schemaRefs: make(map[string]string),
+		schemaCounter: 0,
 	}
 }
 
@@ -34,6 +36,7 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 	r.rootDoc = data
 	r.schemas = make(map[string]interface{})
 	r.schemaRefs = make(map[string]string)
+	r.schemaCounter = 0
 
 	if components, ok := data["components"].(map[string]interface{}); ok {
 		if _, ok := components["schemas"]; !ok {
@@ -45,7 +48,7 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 		}
 	}
 
-	if err := r.collectSchemasAndReplaceRefs(ctx, data, basePath, config, 0, false); err != nil {
+	if err := r.replaceExternalRefs(ctx, data, basePath, config, 0); err != nil {
 		return err
 	}
 
@@ -64,7 +67,7 @@ func (r *ReferenceResolver) Resolve(ctx context.Context, ref string, basePath st
 	return r.resolveRef(ctx, ref, basePath, config, 0)
 }
 
-func (r *ReferenceResolver) collectSchemasAndReplaceRefs(ctx context.Context, node interface{}, baseDir string, config domain.Config, depth int, inSchemas bool) error {
+func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interface{}, baseDir string, config domain.Config, depth int) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -85,10 +88,6 @@ func (r *ReferenceResolver) collectSchemasAndReplaceRefs(ctx context.Context, no
 			return nil
 		}
 
-		if _, isSchemas := n["schemas"]; isSchemas {
-			inSchemas = true
-		}
-
 		if refVal, ok := n["$ref"]; ok {
 			refStr, ok := refVal.(string)
 			if !ok {
@@ -99,7 +98,7 @@ func (r *ReferenceResolver) collectSchemasAndReplaceRefs(ctx context.Context, no
 				return nil
 			}
 
-			internalRef, _, err := r.replaceExternalRef(ctx, refStr, baseDir, config, depth)
+			internalRef, err := r.resolveAndReplaceExternalRef(ctx, refStr, baseDir, config, depth)
 			if err != nil {
 				return fmt.Errorf("failed to replace external ref %s: %w", refStr, err)
 			}
@@ -123,18 +122,14 @@ func (r *ReferenceResolver) collectSchemasAndReplaceRefs(ctx context.Context, no
 				continue
 			}
 
-			childInSchemas := inSchemas
-			if k == "schemas" {
-				childInSchemas = true
-			}
-			if err := r.collectSchemasAndReplaceRefs(ctx, v, baseDir, config, depth, childInSchemas); err != nil {
+			if err := r.replaceExternalRefs(ctx, v, baseDir, config, depth); err != nil {
 				return fmt.Errorf("failed to process field %s: %w", k, err)
 			}
 		}
 
 	case []interface{}:
 		for i, item := range n {
-			if err := r.collectSchemasAndReplaceRefs(ctx, item, baseDir, config, depth, inSchemas); err != nil {
+			if err := r.replaceExternalRefs(ctx, item, baseDir, config, depth); err != nil {
 				return fmt.Errorf("failed to process array item %d: %w", i, err)
 			}
 		}
@@ -143,7 +138,7 @@ func (r *ReferenceResolver) collectSchemasAndReplaceRefs(ctx context.Context, no
 	return nil
 }
 
-func (r *ReferenceResolver) replaceExternalRef(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (string, interface{}, error) {
+func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (string, error) {
 	refParts := strings.SplitN(ref, "#", 2)
 	refPath := refParts[0]
 	fragment := ""
@@ -152,12 +147,12 @@ func (r *ReferenceResolver) replaceExternalRef(ctx context.Context, ref string, 
 	}
 
 	if refPath == "" {
-		return "", nil, nil
+		return "", nil
 	}
 
 	refPath = r.getRefPath(refPath, baseDir)
 	if refPath == "" {
-		return "", nil, &domain.ErrInvalidReference{Ref: ref}
+		return "", &domain.ErrInvalidReference{Ref: ref}
 	}
 
 	if !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
@@ -167,15 +162,9 @@ func (r *ReferenceResolver) replaceExternalRef(ctx context.Context, ref string, 
 	visitedKey := refPath + fragment
 	if r.visited[visitedKey] {
 		if internalRef, ok := r.schemaRefs[visitedKey]; ok {
-			schemaName := r.getSchemaName(ref, fragment)
-			if schemaName != "" {
-				if schema, exists := r.schemas[schemaName]; exists {
-					return internalRef, schema, nil
-				}
-			}
-			return internalRef, nil, nil
+			return internalRef, nil
 		}
-		return "", nil, &domain.ErrCircularReference{Path: visitedKey}
+		return "", &domain.ErrCircularReference{Path: visitedKey}
 	}
 	r.visited[visitedKey] = true
 	defer delete(r.visited, visitedKey)
@@ -183,19 +172,19 @@ func (r *ReferenceResolver) replaceExternalRef(ctx context.Context, ref string, 
 	data, err := r.fileLoader.Load(ctx, refPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", nil, &ErrFileNotFound{Path: refPath}
+			return "", &ErrFileNotFound{Path: refPath}
 		}
-		return "", nil, fmt.Errorf("failed to load file: %w", err)
+		return "", fmt.Errorf("failed to load file: %w", err)
 	}
 
 	if config.MaxFileSize > 0 && int64(len(data)) > config.MaxFileSize {
-		return "", nil, fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
+		return "", fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
 	}
 
 	format := domain.DetectFormat(refPath)
 	var content interface{}
 	if err := r.parser.Unmarshal(data, &content, format); err != nil {
-		return "", nil, fmt.Errorf("failed to parse file: %w", err)
+		return "", fmt.Errorf("failed to parse file: %w", err)
 	}
 
 	var nextBaseDir string
@@ -205,65 +194,87 @@ func (r *ReferenceResolver) replaceExternalRef(ctx context.Context, ref string, 
 		nextBaseDir = filepath.Dir(refPath)
 	}
 
+	var schemaContent interface{}
 	if fragment != "" {
 		extracted, err := r.resolveJSONPointer(content, fragment)
 		if err != nil {
-			return "", nil, fmt.Errorf("failed to resolve fragment %s: %w", fragment, err)
+			return "", fmt.Errorf("failed to resolve fragment %s: %w", fragment, err)
 		}
-
-		schemaName := r.getSchemaName(ref, fragment)
-		if schemaName == "" {
-			return "", nil, fmt.Errorf("cannot determine schema name for ref: %s", ref)
-		}
-
-		if existingRef, ok := r.schemaRefs[visitedKey]; ok {
-			if schema, exists := r.schemas[schemaName]; exists {
-				return existingRef, schema, nil
+		schemaContent = extracted
+	} else {
+		if contentMap, ok := content.(map[string]interface{}); ok {
+			if components, ok := contentMap["components"].(map[string]interface{}); ok {
+				if schemas, ok := components["schemas"].(map[string]interface{}); ok {
+					if len(schemas) == 1 {
+						for _, schema := range schemas {
+							schemaContent = schema
+							break
+						}
+					} else if len(schemas) > 1 {
+						return "", fmt.Errorf("file contains multiple schemas, fragment required: %s", ref)
+					} else {
+						schemaContent = contentMap
+					}
+				} else {
+					schemaContent = contentMap
+				}
+			} else {
+				schemaContent = contentMap
 			}
-			return existingRef, nil, nil
+		} else {
+			schemaContent = content
 		}
-
-		if err := r.collectSchemasAndReplaceRefs(ctx, extracted, nextBaseDir, config, depth+1, false); err != nil {
-			return "", nil, fmt.Errorf("failed to process schema: %w", err)
-		}
-
-		r.schemas[schemaName] = extracted
-		internalRef := "#/components/schemas/" + schemaName
-		r.schemaRefs[visitedKey] = internalRef
-
-		return internalRef, extracted, nil
 	}
 
-	if contentMap, ok := content.(map[string]interface{}); ok {
-		if components, ok := contentMap["components"].(map[string]interface{}); ok {
-			if schemas, ok := components["schemas"].(map[string]interface{}); ok {
-				for schemaName, schema := range schemas {
-					if err := r.collectSchemasAndReplaceRefs(ctx, schema, nextBaseDir, config, depth+1, false); err != nil {
-						return "", nil, fmt.Errorf("failed to process schema %s: %w", schemaName, err)
-					}
+	preferredName := r.getPreferredSchemaName(ref, fragment)
+	components := r.rootDoc["components"].(map[string]interface{})
+	schemas := components["schemas"].(map[string]interface{})
 
-					if _, exists := r.schemas[schemaName]; !exists {
-						r.schemas[schemaName] = schema
-					}
+	var schemaName string
+	if existingSchema, exists := schemas[preferredName]; exists {
+		if existingSchemaMap, ok := existingSchema.(map[string]interface{}); ok {
+			if existingRef, hasRef := existingSchemaMap["$ref"]; hasRef {
+				if existingRefStr, ok := existingRef.(string); ok && existingRefStr == ref {
+					schemaName = preferredName
 				}
 			}
 		}
+		if schemaName == "" {
+			schemaName = r.ensureUniqueSchemaName(preferredName, schemas)
+		}
+	} else {
+		schemaName = preferredName
+	}
 
-		if err := r.collectSchemasAndReplaceRefs(ctx, content, nextBaseDir, config, depth+1, false); err != nil {
-			return "", nil, fmt.Errorf("failed to process external file: %w", err)
+	if existingRef, ok := r.schemaRefs[visitedKey]; ok {
+		return existingRef, nil
+	}
+
+	schemaCopy := r.deepCopy(schemaContent)
+	if err := r.replaceExternalRefs(ctx, schemaCopy, nextBaseDir, config, depth+1); err != nil {
+		return "", fmt.Errorf("failed to process schema: %w", err)
+	}
+
+	if _, exists := schemas[schemaName]; !exists {
+		r.schemas[schemaName] = schemaCopy
+	} else {
+		if _, existsInCollected := r.schemas[schemaName]; !existsInCollected {
+			r.schemas[schemaName] = schemaCopy
 		}
 	}
 
-	return "", nil, nil
+	internalRef := "#/components/schemas/" + schemaName
+	r.schemaRefs[visitedKey] = internalRef
+
+	return internalRef, nil
 }
 
-func (r *ReferenceResolver) getSchemaName(ref, fragment string) string {
+func (r *ReferenceResolver) getPreferredSchemaName(ref, fragment string) string {
 	if fragment != "" {
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
 		if len(parts) >= 3 && parts[0] == "components" && parts[1] == "schemas" {
 			return parts[2]
-		}
-		if len(parts) >= 1 {
+		} else if len(parts) >= 1 {
 			return parts[len(parts)-1]
 		}
 	}
@@ -278,7 +289,22 @@ func (r *ReferenceResolver) getSchemaName(ref, fragment string) string {
 		return baseName
 	}
 
-	return ""
+	r.schemaCounter++
+	return fmt.Sprintf("Schema%d", r.schemaCounter)
+}
+
+func (r *ReferenceResolver) ensureUniqueSchemaName(preferredName string, schemas map[string]interface{}) string {
+	name := preferredName
+	counter := 0
+	for {
+		if _, exists := schemas[name]; !exists {
+			if _, existsInCollected := r.schemas[name]; !existsInCollected {
+				return name
+			}
+		}
+		counter++
+		name = fmt.Sprintf("%s%d", preferredName, counter)
+	}
 }
 
 func (r *ReferenceResolver) resolveRef(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (interface{}, error) {

@@ -1,0 +1,28 @@
+openapi: 3.0.0
+components:
+  schemas:
+    Request:
+      type: object
+      properties:
+        name:
+          type: string
+        contact:
+          $ref: "./contacts.yaml#/components/schemas/Contact"
+    Response:
+      type: object
+      properties:
+        id:
+          type: integer
+        user:
+          $ref: "./users.yaml#/components/schemas/User"
+    Contact:
+      type: object
+      properties:
+        email:
+          type: string
+    User:
+      type: object
+      properties:
+        name:
+          type: string
+
