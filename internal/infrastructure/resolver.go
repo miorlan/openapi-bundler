@@ -20,6 +20,7 @@ type ReferenceResolver struct {
 	components map[string]map[string]interface{}
 	componentRefs map[string]string
 	componentCounter map[string]int
+	pathsBaseDir string
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
@@ -42,6 +43,7 @@ func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) do
 func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]interface{}, basePath string, config domain.Config) error {
 	r.visited = make(map[string]bool)
 	r.rootDoc = data
+	r.pathsBaseDir = ""
 	for _, ct := range componentTypes {
 		r.components[ct] = make(map[string]interface{})
 		r.componentCounter[ct] = 0
@@ -151,6 +153,7 @@ func (r *ReferenceResolver) expandPathsSection(ctx context.Context, data map[str
 	}
 
 	sectionBaseDir := r.getSectionBaseDir(refPath)
+	r.pathsBaseDir = sectionBaseDir
 	if err := r.replaceExternalRefs(ctx, pathsMap, sectionBaseDir, config, 0); err != nil {
 		return fmt.Errorf("failed to process references in paths section: %w", err)
 	}
@@ -438,6 +441,23 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 		for k, v := range n {
 			if skipFields[k] {
 				continue
+			}
+
+			if k == "paths" {
+				if pathsMap, ok := v.(map[string]interface{}); ok {
+					pathsBaseDir := baseDir
+					if r.pathsBaseDir != "" {
+						pathsBaseDir = r.pathsBaseDir
+					}
+					for pathKey, pathValue := range pathsMap {
+						if pathMap, ok := pathValue.(map[string]interface{}); ok {
+							if err := r.replaceExternalRefs(ctx, pathMap, pathsBaseDir, config, depth); err != nil {
+								return fmt.Errorf("failed to process path %s: %w", pathKey, err)
+							}
+						}
+					}
+					continue
+				}
 			}
 
 			if k == "components" {
