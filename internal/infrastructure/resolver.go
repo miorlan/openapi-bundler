@@ -93,6 +93,10 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 		}
 	}
 
+	if err := r.replaceExternalRefs(ctx, data, basePath, config, 0); err != nil {
+		return err
+	}
+
 	return nil
 }
 

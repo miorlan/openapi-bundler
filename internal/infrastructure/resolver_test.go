@@ -853,3 +853,70 @@ func TestReferenceResolver_ExpandSectionWithRelativeRefs(t *testing.T) {
 	}
 }
 
+func TestReferenceResolver_ResolveAll_ItemsWithExternalRef(t *testing.T) {
+	tmpDir := t.TempDir()
+	
+	externalFile := filepath.Join(tmpDir, "GuestContact.yaml")
+	externalContent := []byte(`type: object
+properties:
+  type_id:
+    type: integer
+  value:
+    type: string
+`)
+	if err := os.WriteFile(externalFile, externalContent, 0644); err != nil {
+		t.Fatalf("Failed to create external file: %v", err)
+	}
+
+	loader := NewFileLoader()
+	parser := NewParser()
+	resolver := NewReferenceResolver(loader, parser)
+
+	data := map[string]interface{}{
+		"openapi": "3.0.0",
+		"components": map[string]interface{}{
+			"schemas": map[string]interface{}{
+				"AnonimGuest": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"contacts": map[string]interface{}{
+							"type": "array",
+							"items": map[string]interface{}{
+								"$ref": "./GuestContact.yaml",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	config := domain.Config{MaxDepth: 10}
+
+	err := resolver.ResolveAll(ctx, data, tmpDir, config)
+	if err != nil {
+		t.Fatalf("ResolveAll() error = %v", err)
+	}
+
+	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
+	anonimGuest := schemas["AnonimGuest"].(map[string]interface{})
+	properties := anonimGuest["properties"].(map[string]interface{})
+	contacts := properties["contacts"].(map[string]interface{})
+	items := contacts["items"].(map[string]interface{})
+	
+	ref, hasRef := items["$ref"]
+	if !hasRef {
+		t.Error("items should contain $ref")
+	}
+
+	refStr, ok := ref.(string)
+	if !ok {
+		t.Fatalf("$ref should be a string, got %T", ref)
+	}
+
+	if !strings.HasPrefix(refStr, "#/components/schemas/") {
+		t.Errorf("$ref should be an internal reference, got %s", refStr)
+	}
+}
+

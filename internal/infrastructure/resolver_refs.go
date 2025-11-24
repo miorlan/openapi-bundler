@@ -175,7 +175,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 					for _, ct := range componentTypes {
 						if section, ok := componentsMap[ct].(map[string]interface{}); ok {
 							componentBaseDir := baseDir
-							if savedBaseDir, exists := r.componentsBaseDir[ct]; exists {
+							if savedBaseDir, exists := r.componentsBaseDir[ct]; exists && savedBaseDir != "" {
 								componentBaseDir = savedBaseDir
 							}
 							for name, component := range section {
