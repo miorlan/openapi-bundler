@@ -94,20 +94,26 @@ func (r *ReferenceResolver) Resolve(ctx context.Context, ref string, basePath st
 }
 
 func (r *ReferenceResolver) expandSectionRefs(ctx context.Context, data map[string]interface{}, baseDir string, config domain.Config) error {
-	if paths, ok := data["paths"].(map[string]interface{}); ok {
-		if refVal, hasRef := paths["$ref"]; hasRef {
-			if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
-				content, err := r.loadAndParseFile(ctx, refStr, baseDir, config)
-				if err != nil {
-					return fmt.Errorf("failed to expand paths section: %w", err)
+	if pathsVal, ok := data["paths"]; ok {
+		var refStr string
+		if paths, ok := pathsVal.(map[string]interface{}); ok {
+			if refVal, hasRef := paths["$ref"]; hasRef {
+				if ref, ok := refVal.(string); ok && !strings.HasPrefix(ref, "#") {
+					refStr = ref
 				}
-				pathsMap := r.extractSection(content, "paths")
-				if pathsMap != nil {
-					for k, v := range pathsMap {
-						paths[k] = v
-					}
-					delete(paths, "$ref")
-				}
+			}
+		} else if ref, ok := pathsVal.(string); ok && !strings.HasPrefix(ref, "#") {
+			refStr = ref
+		}
+		
+		if refStr != "" {
+			content, err := r.loadAndParseFile(ctx, refStr, baseDir, config)
+			if err != nil {
+				return fmt.Errorf("failed to expand paths section: %w", err)
+			}
+			pathsMap := r.extractSection(content, "paths")
+			if pathsMap != nil {
+				data["paths"] = pathsMap
 			}
 		}
 	}
@@ -115,32 +121,35 @@ func (r *ReferenceResolver) expandSectionRefs(ctx context.Context, data map[stri
 	if components, ok := data["components"].(map[string]interface{}); ok {
 		componentTypes := []string{"schemas", "responses", "parameters", "examples", "requestBodies", "headers", "securitySchemes", "links", "callbacks"}
 		for _, ct := range componentTypes {
-			if section, ok := components[ct].(map[string]interface{}); ok {
+			sectionVal, exists := components[ct]
+			if !exists {
+				continue
+			}
+			
+			var refStr string
+			if section, ok := sectionVal.(map[string]interface{}); ok {
 				if refVal, hasRef := section["$ref"]; hasRef {
-					if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
-						content, err := r.loadAndParseFile(ctx, refStr, baseDir, config)
-						if err != nil {
-							return fmt.Errorf("failed to expand components.%s section: %w", ct, err)
-						}
-						sectionMap := r.extractSection(content, "components", ct)
-						if sectionMap != nil {
-							for k, v := range sectionMap {
-								section[k] = v
-							}
-							delete(section, "$ref")
-						}
+					if ref, ok := refVal.(string); ok && !strings.HasPrefix(ref, "#") {
+						refStr = ref
 					}
 				}
-			} else if refVal, ok := components[ct]; ok {
-				if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
-					content, err := r.loadAndParseFile(ctx, refStr, baseDir, config)
-					if err != nil {
-						return fmt.Errorf("failed to expand components.%s section: %w", ct, err)
+			} else if ref, ok := sectionVal.(string); ok && !strings.HasPrefix(ref, "#") {
+				refStr = ref
+			}
+			
+			if refStr != "" {
+				content, err := r.loadAndParseFile(ctx, refStr, baseDir, config)
+				if err != nil {
+					return fmt.Errorf("failed to expand components.%s section: %w", ct, err)
+				}
+				sectionMap := r.extractSection(content, "components", ct)
+				if sectionMap == nil {
+					if m, ok := content.(map[string]interface{}); ok {
+						sectionMap = m
 					}
-					sectionMap := r.extractSection(content, "components", ct)
-					if sectionMap != nil {
-						components[ct] = sectionMap
-					}
+				}
+				if sectionMap != nil {
+					components[ct] = sectionMap
 				}
 			}
 		}
@@ -151,9 +160,19 @@ func (r *ReferenceResolver) expandSectionRefs(ctx context.Context, data map[stri
 
 func (r *ReferenceResolver) extractSection(content interface{}, path ...string) map[string]interface{} {
 	current := content
-	for _, key := range path {
+	for i, key := range path {
 		if m, ok := current.(map[string]interface{}); ok {
-			current = m[key]
+			if val, exists := m[key]; exists {
+				current = val
+			} else {
+				if i == 0 && len(path) > 1 {
+					return nil
+				}
+				if i == 0 && len(path) == 1 {
+					return m
+				}
+				return nil
+			}
 		} else {
 			return nil
 		}
