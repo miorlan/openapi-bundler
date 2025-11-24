@@ -5,7 +5,6 @@ import (
 	"github.com/miorlan/openapi-bundler/internal/usecase"
 )
 
-// newBundler создает новый экземпляр BundleUseCase с зависимостями
 func newBundler() *usecase.BundleUseCase {
 	fileLoader := infrastructure.NewFileLoader()
 	fileWriter := infrastructure.NewFileWriter()

@@ -7,7 +7,6 @@ import (
 	"strings"
 )
 
-// ProgressBar представляет простой прогресс-бар
 type ProgressBar struct {
 	total   int
 	current int
@@ -15,7 +14,6 @@ type ProgressBar struct {
 	enabled bool
 }
 
-// NewProgressBar создает новый прогресс-бар
 func NewProgressBar(total int, enabled bool) *ProgressBar {
 	return &ProgressBar{
 		total:   total,
@@ -25,7 +23,6 @@ func NewProgressBar(total int, enabled bool) *ProgressBar {
 	}
 }
 
-// Update обновляет прогресс-бар
 func (pb *ProgressBar) Update(current int, message string) {
 	if !pb.enabled {
 		return
@@ -42,13 +39,11 @@ func (pb *ProgressBar) Update(current int, message string) {
 		if current >= pb.total {
 			fmt.Fprintf(pb.writer, "\n")
 		}
-	} else {
-		// Если total неизвестен, показываем только счетчик
+		} else {
 		fmt.Fprintf(pb.writer, "\rОбработано файлов: %d %s", current, message)
 	}
 }
 
-// Finish завершает прогресс-бар
 func (pb *ProgressBar) Finish() {
 	if !pb.enabled {
 		return
@@ -56,13 +51,11 @@ func (pb *ProgressBar) Finish() {
 	fmt.Fprintf(pb.writer, "\n")
 }
 
-// SimpleProgress показывает простой прогресс без бара
 type SimpleProgress struct {
 	writer  io.Writer
 	enabled bool
 }
 
-// NewSimpleProgress создает новый простой прогресс
 func NewSimpleProgress(enabled bool) *SimpleProgress {
 	return &SimpleProgress{
 		writer:  os.Stderr,
@@ -70,7 +63,6 @@ func NewSimpleProgress(enabled bool) *SimpleProgress {
 	}
 }
 
-// Update обновляет прогресс
 func (sp *SimpleProgress) Update(message string) {
 	if !sp.enabled {
 		return

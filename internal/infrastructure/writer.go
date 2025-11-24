@@ -8,16 +8,13 @@ import (
 	"github.com/miorlan/openapi-bundler/internal/domain"
 )
 
-// FileWriter реализует запись файлов
 type FileWriter struct{}
 
-// NewFileWriter создает новый FileWriter
 func NewFileWriter() domain.FileWriter {
 	return &FileWriter{}
 }
 
-// Write записывает данные в файл
-// Если data == nil, файл удаляется (используется при ошибке валидации)
+// Write удаляет файл, если data == nil (используется при ошибке валидации)
 func (fw *FileWriter) Write(path string, data []byte) error {
 	if data == nil {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

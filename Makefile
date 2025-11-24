@@ -15,11 +15,24 @@ build: ## Собрать бинарный файл
 	@go build -o $(BINARY_NAME) ./cmd
 	@echo "✅ Готово: ./$(BINARY_NAME)"
 
-install: build ## Установить в $(INSTALL_PATH)
+install: build ## Установить в $(INSTALL_PATH) с созданием симлинка
 	@echo "📦 Установка $(BINARY_NAME) в $(INSTALL_PATH)..."
 	@mkdir -p $(INSTALL_PATH)
 	@cp $(BINARY_NAME) $(INSTALL_PATH)/$(BINARY_NAME)
 	@echo "✅ Установлено: $(INSTALL_PATH)/$(BINARY_NAME)"
+	@echo "💡 Убедитесь, что $(INSTALL_PATH) в вашем PATH"
+
+install-go: ## Установить через go install и создать симлинк
+	@echo "📦 Установка через go install..."
+	@go install ./cmd
+	@echo "🔗 Создание симлинка openapi-bundler -> cmd..."
+	@if [ -f "$(INSTALL_PATH)/cmd" ]; then \
+		ln -sf $(INSTALL_PATH)/cmd $(INSTALL_PATH)/openapi-bundler; \
+		echo "✅ Симлинк создан: $(INSTALL_PATH)/openapi-bundler -> $(INSTALL_PATH)/cmd"; \
+	else \
+		echo "❌ Ошибка: $(INSTALL_PATH)/cmd не найден"; \
+		exit 1; \
+	fi
 	@echo "💡 Убедитесь, что $(INSTALL_PATH) в вашем PATH"
 
 clean: ## Удалить собранные файлы

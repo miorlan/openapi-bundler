@@ -8,15 +8,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Parser реализует парсинг YAML и JSON
 type Parser struct{}
 
-// NewParser создает новый парсер
 func NewParser() domain.Parser {
 	return &Parser{}
 }
 
-// Unmarshal парсит данные в зависимости от формата
 func (p *Parser) Unmarshal(data []byte, v interface{}, format domain.FileFormat) error {
 	switch format {
 	case domain.FormatJSON:
@@ -28,7 +25,6 @@ func (p *Parser) Unmarshal(data []byte, v interface{}, format domain.FileFormat)
 	}
 }
 
-// Marshal сериализует данные в зависимости от формата
 func (p *Parser) Marshal(v interface{}, format domain.FileFormat) ([]byte, error) {
 	switch format {
 	case domain.FormatJSON:
@@ -40,7 +36,6 @@ func (p *Parser) Marshal(v interface{}, format domain.FileFormat) ([]byte, error
 	}
 }
 
-// unmarshalByContent пытается определить формат по содержимому
 func (p *Parser) unmarshalByContent(data []byte, v interface{}) error {
 	trimmed := strings.TrimSpace(string(data))
 	if len(trimmed) == 0 {

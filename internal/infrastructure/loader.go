@@ -13,17 +13,14 @@ import (
 	"github.com/miorlan/openapi-bundler/internal/domain"
 )
 
-// FileLoader реализует загрузку файлов (локальных и по HTTP)
 type FileLoader struct {
 	client *http.Client
 }
 
-// NewFileLoader создает новый FileLoader
 func NewFileLoader() domain.FileLoader {
 	return NewFileLoaderWithTimeout(30 * time.Second)
 }
 
-// NewFileLoaderWithTimeout создает новый FileLoader с указанным таймаутом
 func NewFileLoaderWithTimeout(timeout time.Duration) domain.FileLoader {
 	return &FileLoader{
 		client: &http.Client{
@@ -32,14 +29,11 @@ func NewFileLoaderWithTimeout(timeout time.Duration) domain.FileLoader {
 	}
 }
 
-// Load загружает файл с локального диска или по HTTP
 func (fl *FileLoader) Load(ctx context.Context, path string) ([]byte, error) {
-	// Проверяем контекст
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 
-	// Защита от path traversal для локальных файлов
 	if !strings.HasPrefix(path, "http://") && !strings.HasPrefix(path, "https://") {
 		cleanPath := filepath.Clean(path)
 		if !filepath.IsAbs(cleanPath) {
@@ -58,7 +52,6 @@ func (fl *FileLoader) Load(ctx context.Context, path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// loadHTTP загружает файл по HTTP
 func (fl *FileLoader) loadHTTP(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

@@ -69,6 +69,8 @@ go get github.com/miorlan/openapi-bundler
 
 ### Как CLI утилита
 
+**Стандартный формат:**
+
 ```bash
 # Базовое использование (YAML)
 openapi-bundler bundle -i api/openapi/index.yaml -o api/openapi/openapi.gen.yaml
@@ -90,7 +92,18 @@ openapi-bundler bundle --input input.yaml --output output.yaml
 
 # С подробным выводом (verbose)
 openapi-bundler bundle -i input.yaml -o output.yaml --verbose
+```
 
+```bash
+# Прямая замена swagger-cli - работает точно так же!
+openapi-bundler bundle -o api/openapi/openapi.yaml api/openapi/index.yaml
+openapi-bundler bundle -o api/openapi/openapi.yaml api/openapi/index.yaml --type yaml
+openapi-bundler bundle -o api/openapi/openapi.json api/openapi/index.json --type json
+```
+
+**Другие команды:**
+
+```bash
 # Показать версию
 openapi-bundler version
 
@@ -145,7 +158,11 @@ func main() {
 - `http://example.com/schema.json` - HTTP ссылки на JSON файлы
 
 ### Внутренние ссылки
-- `#/components/schemas/User` - внутренние ссылки (оставляются как есть)
+- `#/components/schemas/User` - внутренние ссылки (разрешаются и встраиваются)
+
+### Внешние ссылки с фрагментами
+- `file.yaml#/components/schemas/User` - извлекает только указанную часть схемы из внешнего файла
+- `https://example.com/api.yaml#/components/schemas/User` - извлекает фрагмент из удаленного файла
 
 ### Форматы файлов
 - Автоматическое определение формата по расширению (`.yaml`, `.yml`, `.json`)
@@ -156,7 +173,10 @@ func main() {
 
 1. Загружает корневой OpenAPI файл
 2. Рекурсивно находит все `$ref` ссылки
-3. Загружает содержимое по ссылкам
+3. Разрешает ссылки:
+   - **Внешние файлы**: загружает файл и встраивает его содержимое
+   - **Внешние файлы с фрагментами**: загружает файл и извлекает только указанную часть (например, `file.yaml#/components/schemas/User`)
+   - **Внутренние ссылки**: извлекает часть из текущего документа (например, `#/components/schemas/User`)
 4. Заменяет `$ref` на фактическое содержимое
 5. Сохраняет результат в один файл
 
@@ -171,7 +191,10 @@ func main() {
 # Было (swagger-cli)
 swagger-cli bundle -o api/openapi/openapi.yaml api/openapi/index.yaml --type yaml
 
-# Стало (openapi-bundler)
+# Стало (openapi-bundler) - работает точно так же!
+openapi-bundler bundle -o api/openapi/openapi.yaml api/openapi/index.yaml --type yaml
+
+# Или в стандартном формате
 openapi-bundler bundle -i api/openapi/index.yaml -o api/openapi/openapi.yaml
 ```
 
@@ -181,14 +204,24 @@ openapi-bundler bundle -i api/openapi/index.yaml -o api/openapi/openapi.yaml
 
 ```makefile
 api:
-	@if ! command -v openapi-bundler >/dev/null 2>&1; then \
-		echo "openapi-bundler не найден. Установи: go install github.com/miorlan/openapi-bundler/cmd@latest"; \
-		exit 1; \
-	fi
-	openapi-bundler bundle -i api/openapi/index.yaml -o api/openapi/openapi.yaml
+	@# Проверяем наличие openapi-bundler или cmd, создаем симлинк при необходимости
+	@BUNDLER=$$(command -v openapi-bundler 2>/dev/null || echo ""); \
+	if [ -z "$$BUNDLER" ]; then \
+		GOPATH_BIN=$$(go env GOPATH)/bin; \
+		if [ -f "$$GOPATH_BIN/cmd" ]; then \
+			echo "🔗 Создание симлинка openapi-bundler -> cmd..."; \
+			ln -sf "$$GOPATH_BIN/cmd" "$$GOPATH_BIN/openapi-bundler"; \
+			BUNDLER="$$GOPATH_BIN/openapi-bundler"; \
+		else \
+			echo "❌ openapi-bundler не найден."; \
+			echo "📦 Установите: go install github.com/miorlan/openapi-bundler/cmd@latest"; \
+			echo "💡 После установки создайте симлинк: ln -s \$$(go env GOPATH)/bin/cmd \$$(go env GOPATH)/bin/openapi-bundler"; \
+			exit 1; \
+		fi; \
+	fi; \
+	$$BUNDLER bundle -o api/openapi/openapi.yaml api/openapi/index.yaml
 	go tool oapi-codegen --config=api/openapi/config.yaml api/openapi/openapi.yaml
 ```
-
 
 ## Разработка
 

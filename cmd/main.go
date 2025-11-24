@@ -47,6 +47,7 @@ func main() {
 			outputPath string
 			validate   bool
 			verbose    bool
+			fileType   string // для совместимости со swagger-cli (--type)
 		)
 
 		bundleCmd := flag.NewFlagSet("bundle", flag.ExitOnError)
@@ -54,6 +55,7 @@ func main() {
 		bundleCmd.StringVar(&inputPath, "input", "", "Путь к входному OpenAPI файлу")
 		bundleCmd.StringVar(&outputPath, "o", "", "Путь к выходному файлу")
 		bundleCmd.StringVar(&outputPath, "output", "", "Путь к выходному файлу")
+		bundleCmd.StringVar(&fileType, "type", "", "Тип файла (yaml/json) - для совместимости со swagger-cli, определяется автоматически")
 		bundleCmd.BoolVar(&validate, "validate", false, "Валидировать OpenAPI спецификацию после объединения")
 		bundleCmd.BoolVar(&verbose, "verbose", false, "Подробный вывод")
 		bundleCmd.BoolVar(&verbose, "v", false, "Подробный вывод (краткая форма)")
@@ -63,9 +65,17 @@ func main() {
 			os.Exit(1)
 		}
 
+		// Поддержка swagger-cli формата: позиционный аргумент для input
+		// swagger-cli bundle -o output.yaml input.yaml --type yaml
+		if inputPath == "" && len(bundleCmd.Args()) > 0 {
+			inputPath = bundleCmd.Args()[0]
+		}
+
 		if inputPath == "" || outputPath == "" {
 			fmt.Fprintf(os.Stderr, "❌ Ошибка: необходимо указать входной и выходной файлы\n")
-			fmt.Fprintf(os.Stderr, "Использование: openapi-bundler bundle -i <input> -o <output>\n")
+			fmt.Fprintf(os.Stderr, "Использование:\n")
+			fmt.Fprintf(os.Stderr, "  openapi-bundler bundle -i <input> -o <output>\n")
+			fmt.Fprintf(os.Stderr, "  openapi-bundler bundle -o <output> <input>  (совместимо со swagger-cli)\n")
 			os.Exit(1)
 		}
 
@@ -145,23 +155,16 @@ func printUsage() {
 
 Команды:
   bundle    Объединить разбитую OpenAPI спецификацию в один файл
+            Используйте 'openapi-bundler bundle --help' для справки по флагам
   version   Показать версию
   help      Показать эту справку
 
 Примеры:
-  openapi-bundler bundle -i api/openapi/index.yaml -o api/openapi/openapi.gen.yaml
-  openapi-bundler bundle -i api/openapi/index.json -o api/openapi/openapi.gen.json
-  openapi-bundler bundle -i api/openapi/index.yaml -o api/openapi/openapi.gen.json
-  openapi-bundler bundle -i https://example.com/api/openapi.yaml -o local.yaml --validate
-  openapi-bundler bundle --input input.yaml --output output.yaml
-  openapi-bundler bundle -i input.yaml -o output.yaml --verbose
+  openapi-bundler bundle -i input.yaml -o output.yaml
+  openapi-bundler bundle -o output.yaml input.yaml  # формат swagger-cli
   openapi-bundler version
 
-Флаги для bundle:
-  -i, --input <path>     Путь к входному OpenAPI файлу
-  -o, --output <path>    Путь к выходному файлу
-  --validate             Валидировать OpenAPI спецификацию после объединения
-  -v, --verbose          Подробный вывод процесса объединения
+Подробная документация: https://github.com/miorlan/openapi-bundler
 
 `)
 }

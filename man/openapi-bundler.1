@@ -37,6 +37,9 @@ HTTP/HTTPS ссылки на внешние файлы
 .BR \-o ", " \-\-output " " \fIPATH\fR
 Путь к выходному файлу
 .TP
+.BR \-\-type " " \fITYPE\fR
+Тип файла (yaml/json) - для совместимости со swagger-cli, определяется автоматически
+.TP
 .BR \-\-validate
 Валидировать OpenAPI спецификацию после объединения
 .TP
@@ -46,6 +49,9 @@ HTTP/HTTPS ссылки на внешние файлы
 .TP
 Базовое использование:
 .B openapi-bundler bundle -i api/openapi/index.yaml -o api/openapi/openapi.gen.yaml
+.TP
+Формат swagger-cli (совместимость):
+.B openapi-bundler bundle -o api/openapi/openapi.yaml api/openapi/index.yaml
 .TP
 С валидацией:
 .B openapi-bundler bundle -i api/openapi/index.yaml -o api/openapi/openapi.gen.yaml --validate
