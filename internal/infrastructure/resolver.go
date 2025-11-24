@@ -10,6 +10,8 @@ import (
 	"github.com/miorlan/openapi-bundler/internal/domain"
 )
 
+var componentTypes = []string{"schemas", "responses", "parameters", "examples", "requestBodies", "headers", "securitySchemes", "links", "callbacks"}
+
 type ReferenceResolver struct {
 	fileLoader domain.FileLoader
 	parser     domain.Parser
@@ -21,7 +23,6 @@ type ReferenceResolver struct {
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
-	componentTypes := []string{"schemas", "responses", "parameters", "examples", "requestBodies", "headers", "securitySchemes", "links", "callbacks"}
 	components := make(map[string]map[string]interface{})
 	componentCounter := make(map[string]int)
 	for _, ct := range componentTypes {
@@ -41,7 +42,6 @@ func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) do
 func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]interface{}, basePath string, config domain.Config) error {
 	r.visited = make(map[string]bool)
 	r.rootDoc = data
-	componentTypes := []string{"schemas", "responses", "parameters", "examples", "requestBodies", "headers", "securitySchemes", "links", "callbacks"}
 	for _, ct := range componentTypes {
 		r.components[ct] = make(map[string]interface{})
 		r.componentCounter[ct] = 0
@@ -90,10 +90,125 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 }
 
 func (r *ReferenceResolver) Resolve(ctx context.Context, ref string, basePath string, config domain.Config) (interface{}, error) {
-	return r.resolveRef(ctx, ref, basePath, config, 0)
+	refPath := r.getRefPath(ref, basePath)
+	if refPath == "" {
+		return nil, &domain.ErrInvalidReference{Ref: ref}
+	}
+	return r.loadAndParseFile(ctx, ref, basePath, config)
 }
 
 func (r *ReferenceResolver) expandSectionRefs(ctx context.Context, data map[string]interface{}, baseDir string, config domain.Config) error {
+	if err := r.expandPathsSection(ctx, data, baseDir, config); err != nil {
+		return err
+	}
+	return r.expandComponentsSections(ctx, data, baseDir, config)
+}
+
+func (r *ReferenceResolver) extractRefFromValue(val interface{}) string {
+	if section, ok := val.(map[string]interface{}); ok {
+		if refVal, hasRef := section["$ref"]; hasRef {
+			if ref, ok := refVal.(string); ok && !strings.HasPrefix(ref, "#") {
+				return ref
+			}
+		}
+	} else if ref, ok := val.(string); ok && !strings.HasPrefix(ref, "#") {
+		return ref
+	}
+	return ""
+}
+
+func (r *ReferenceResolver) getSectionBaseDir(refPath string) string {
+	if strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") {
+		return refPath[:strings.LastIndex(refPath, "/")+1]
+	}
+	return filepath.Dir(refPath)
+}
+
+func (r *ReferenceResolver) expandPathsSection(ctx context.Context, data map[string]interface{}, baseDir string, config domain.Config) error {
+	pathsVal, ok := data["paths"]
+	if !ok {
+		return nil
+	}
+
+	refStr := r.extractRefFromValue(pathsVal)
+	if refStr == "" {
+		return nil
+	}
+
+	refPath := r.getRefPath(refStr, baseDir)
+	if refPath == "" {
+		return fmt.Errorf("invalid paths reference: %s", refStr)
+	}
+
+	content, err := r.loadAndParseFile(ctx, refStr, baseDir, config)
+	if err != nil {
+		return fmt.Errorf("failed to expand paths section: %w", err)
+	}
+
+	pathsMap := r.extractSection(content, "paths")
+	if pathsMap == nil {
+		return nil
+	}
+
+	sectionBaseDir := r.getSectionBaseDir(refPath)
+	if err := r.replaceExternalRefs(ctx, pathsMap, sectionBaseDir, config, 0); err != nil {
+		return fmt.Errorf("failed to process references in paths section: %w", err)
+	}
+
+	data["paths"] = pathsMap
+	return nil
+}
+
+func (r *ReferenceResolver) expandComponentsSections(ctx context.Context, data map[string]interface{}, baseDir string, config domain.Config) error {
+	components, ok := data["components"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	for _, ct := range componentTypes {
+		sectionVal, exists := components[ct]
+		if !exists {
+			continue
+		}
+
+		refStr := r.extractRefFromValue(sectionVal)
+		if refStr == "" {
+			continue
+		}
+
+		refPath := r.getRefPath(refStr, baseDir)
+		if refPath == "" {
+			return fmt.Errorf("invalid components.%s reference: %s", ct, refStr)
+		}
+
+		content, err := r.loadAndParseFile(ctx, refStr, baseDir, config)
+		if err != nil {
+			return fmt.Errorf("failed to expand components.%s section: %w", ct, err)
+		}
+
+		sectionMap := r.extractSection(content, "components", ct)
+		if sectionMap == nil {
+			if m, ok := content.(map[string]interface{}); ok {
+				sectionMap = m
+			}
+		}
+
+		if sectionMap == nil {
+			continue
+		}
+
+		sectionBaseDir := r.getSectionBaseDir(refPath)
+		if err := r.replaceExternalRefs(ctx, sectionMap, sectionBaseDir, config, 0); err != nil {
+			return fmt.Errorf("failed to process references in components.%s section: %w", ct, err)
+		}
+
+		components[ct] = sectionMap
+	}
+
+	return nil
+}
+
+func (r *ReferenceResolver) oldExpandSectionRefs(ctx context.Context, data map[string]interface{}, baseDir string, config domain.Config) error {
 	if pathsVal, ok := data["paths"]; ok {
 		var refStr string
 		if paths, ok := pathsVal.(map[string]interface{}); ok {
@@ -107,19 +222,34 @@ func (r *ReferenceResolver) expandSectionRefs(ctx context.Context, data map[stri
 		}
 		
 		if refStr != "" {
+			refPath := r.getRefPath(refStr, baseDir)
+			if refPath == "" {
+				return fmt.Errorf("invalid paths reference: %s", refStr)
+			}
+			
 			content, err := r.loadAndParseFile(ctx, refStr, baseDir, config)
 			if err != nil {
 				return fmt.Errorf("failed to expand paths section: %w", err)
 			}
 			pathsMap := r.extractSection(content, "paths")
 			if pathsMap != nil {
+				var sectionBaseDir string
+				if strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") {
+					sectionBaseDir = refPath[:strings.LastIndex(refPath, "/")+1]
+				} else {
+					sectionBaseDir = filepath.Dir(refPath)
+				}
+				
+				if err := r.replaceExternalRefs(ctx, pathsMap, sectionBaseDir, config, 0); err != nil {
+					return fmt.Errorf("failed to process references in paths section: %w", err)
+				}
+				
 				data["paths"] = pathsMap
 			}
 		}
 	}
 
 	if components, ok := data["components"].(map[string]interface{}); ok {
-		componentTypes := []string{"schemas", "responses", "parameters", "examples", "requestBodies", "headers", "securitySchemes", "links", "callbacks"}
 		for _, ct := range componentTypes {
 			sectionVal, exists := components[ct]
 			if !exists {
@@ -138,6 +268,11 @@ func (r *ReferenceResolver) expandSectionRefs(ctx context.Context, data map[stri
 			}
 			
 			if refStr != "" {
+				refPath := r.getRefPath(refStr, baseDir)
+				if refPath == "" {
+					return fmt.Errorf("invalid components.%s reference: %s", ct, refStr)
+				}
+				
 				content, err := r.loadAndParseFile(ctx, refStr, baseDir, config)
 				if err != nil {
 					return fmt.Errorf("failed to expand components.%s section: %w", ct, err)
@@ -149,6 +284,17 @@ func (r *ReferenceResolver) expandSectionRefs(ctx context.Context, data map[stri
 					}
 				}
 				if sectionMap != nil {
+					var sectionBaseDir string
+					if strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") {
+						sectionBaseDir = refPath[:strings.LastIndex(refPath, "/")+1]
+					} else {
+						sectionBaseDir = filepath.Dir(refPath)
+					}
+					
+					if err := r.replaceExternalRefs(ctx, sectionMap, sectionBaseDir, config, 0); err != nil {
+						return fmt.Errorf("failed to process references in components.%s section: %w", ct, err)
+					}
+					
 					components[ct] = sectionMap
 				}
 			}
@@ -248,13 +394,35 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 				return nil
 			}
 
-			internalRef, err := r.resolveAndReplaceExternalRef(ctx, refStr, baseDir, config, depth)
-			if err != nil {
-				return fmt.Errorf("failed to replace external ref %s: %w", refStr, err)
+			refParts := strings.SplitN(refStr, "#", 2)
+			fragment := ""
+			if len(refParts) > 1 {
+				fragment = refParts[1]
 			}
 
-			if internalRef != "" {
-				n["$ref"] = internalRef
+			if fragment != "" && strings.HasPrefix(fragment, "/components/") {
+				internalRef, err := r.resolveAndReplaceExternalRef(ctx, refStr, baseDir, config, depth)
+				if err != nil {
+					return fmt.Errorf("failed to replace external ref %s: %w", refStr, err)
+				}
+
+				if internalRef != "" {
+					n["$ref"] = internalRef
+				}
+
+				return nil
+			}
+
+			expanded, err := r.expandPathRef(ctx, refStr, baseDir, config, depth)
+			if err != nil {
+				return fmt.Errorf("failed to expand path ref %s: %w", refStr, err)
+			}
+
+			if expanded != nil {
+				for k, v := range expanded {
+					n[k] = v
+				}
+				delete(n, "$ref")
 			}
 
 			return nil
@@ -274,7 +442,6 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 
 			if k == "components" {
 				if componentsMap, ok := v.(map[string]interface{}); ok {
-					componentTypes := []string{"schemas", "responses", "parameters", "examples", "requestBodies", "headers", "securitySchemes", "links", "callbacks"}
 					for _, ct := range componentTypes {
 						if section, ok := componentsMap[ct].(map[string]interface{}); ok {
 							for name, component := range section {
@@ -389,7 +556,6 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 	} else {
 		if contentMap, ok := content.(map[string]interface{}); ok {
 			if comps, ok := contentMap["components"].(map[string]interface{}); ok {
-				componentTypes := []string{"schemas", "responses", "parameters", "examples", "requestBodies", "headers", "securitySchemes", "links", "callbacks"}
 				for _, ct := range componentTypes {
 					if section, ok := comps[ct].(map[string]interface{}); ok && len(section) == 1 {
 						for _, comp := range section {
@@ -468,6 +634,61 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 	return internalRef, nil
 }
 
+func (r *ReferenceResolver) expandPathRef(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (map[string]interface{}, error) {
+	refPath := r.getRefPath(ref, baseDir)
+	if refPath == "" {
+		return nil, &domain.ErrInvalidReference{Ref: ref}
+	}
+
+	if !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
+		refPath = filepath.Clean(refPath)
+	}
+
+	visitedKey := refPath
+	if r.visited[visitedKey] {
+		return nil, &domain.ErrCircularReference{Path: visitedKey}
+	}
+	r.visited[visitedKey] = true
+	defer delete(r.visited, visitedKey)
+
+	data, err := r.fileLoader.Load(ctx, refPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, &ErrFileNotFound{Path: refPath}
+		}
+		return nil, fmt.Errorf("failed to load file: %w", err)
+	}
+
+	if config.MaxFileSize > 0 && int64(len(data)) > config.MaxFileSize {
+		return nil, fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
+	}
+
+	format := domain.DetectFormat(refPath)
+	var content interface{}
+	if err := r.parser.Unmarshal(data, &content, format); err != nil {
+		return nil, fmt.Errorf("failed to parse file: %w", err)
+	}
+
+	var nextBaseDir string
+	if strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") {
+		nextBaseDir = refPath[:strings.LastIndex(refPath, "/")+1]
+	} else {
+		nextBaseDir = filepath.Dir(refPath)
+	}
+
+	contentMap, ok := content.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("path reference content must be a map, got %T", content)
+	}
+
+	expanded := r.deepCopy(contentMap).(map[string]interface{})
+	if err := r.replaceExternalRefs(ctx, expanded, nextBaseDir, config, depth+1); err != nil {
+		return nil, fmt.Errorf("failed to process references in path: %w", err)
+	}
+
+	return expanded, nil
+}
+
 func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentType string) string {
 	if fragment != "" {
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
@@ -508,10 +729,6 @@ func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, sect
 		counter++
 		name = fmt.Sprintf("%s%d", preferredName, counter)
 	}
-}
-
-func (r *ReferenceResolver) resolveRef(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (interface{}, error) {
-	return nil, nil
 }
 
 func (r *ReferenceResolver) resolveJSONPointer(doc interface{}, pointer string) (interface{}, error) {

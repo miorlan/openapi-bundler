@@ -702,3 +702,83 @@ properties:
 	}
 }
 
+func TestReferenceResolver_ExpandSectionWithRelativeRefs(t *testing.T) {
+	tmpDir := t.TempDir()
+	
+	pathsFile := filepath.Join(tmpDir, "paths", "_index.yaml")
+	if err := os.MkdirAll(filepath.Dir(pathsFile), 0755); err != nil {
+		t.Fatalf("Failed to create paths directory: %v", err)
+	}
+	
+	tableRegistryFile := filepath.Join(tmpDir, "paths", "tableRegistry.yaml")
+	tableRegistryContent := []byte(`get:
+  operationId: getTableRegistry
+  summary: Получить все записи из справочника
+  responses:
+    '200':
+      description: OK
+`)
+	if err := os.WriteFile(tableRegistryFile, tableRegistryContent, 0644); err != nil {
+		t.Fatalf("Failed to create tableRegistry file: %v", err)
+	}
+
+	pathsContent := []byte(`/api/v1/table-registry:
+  $ref: ./tableRegistry.yaml
+`)
+	if err := os.WriteFile(pathsFile, pathsContent, 0644); err != nil {
+		t.Fatalf("Failed to create paths file: %v", err)
+	}
+
+	loader := NewFileLoader()
+	parser := NewParser()
+	resolver := NewReferenceResolver(loader, parser)
+
+	data := map[string]interface{}{
+		"openapi": "3.0.3",
+		"paths": map[string]interface{}{
+			"$ref": "./paths/_index.yaml",
+		},
+	}
+
+	ctx := context.Background()
+	config := domain.Config{MaxDepth: 10}
+
+	err := resolver.ResolveAll(ctx, data, tmpDir, config)
+	if err != nil {
+		t.Fatalf("ResolveAll() error = %v", err)
+	}
+
+	paths, ok := data["paths"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("paths should be a map, got %T", data["paths"])
+	}
+
+	if _, hasRef := paths["$ref"]; hasRef {
+		t.Error("paths should not contain $ref after expansion")
+	}
+
+	tableRegistryPath, hasTableRegistry := paths["/api/v1/table-registry"]
+	if !hasTableRegistry {
+		t.Error("paths should contain /api/v1/table-registry after expansion")
+	}
+
+	tableRegistryMap, ok := tableRegistryPath.(map[string]interface{})
+	if !ok {
+		t.Fatalf("/api/v1/table-registry should be a map, got %T", tableRegistryPath)
+	}
+
+	getOp, hasGet := tableRegistryMap["get"]
+	if !hasGet {
+		t.Error("/api/v1/table-registry should contain 'get' operation")
+	}
+
+	getOpMap, ok := getOp.(map[string]interface{})
+	if !ok {
+		t.Fatalf("get operation should be a map, got %T", getOp)
+	}
+
+	if getOpMap["operationId"] != "getTableRegistry" {
+		t.Errorf("expected operationId to be 'getTableRegistry', got %v", getOpMap["operationId"])
+	}
+}
+
