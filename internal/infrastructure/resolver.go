@@ -2,6 +2,8 @@ package infrastructure
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,6 +23,8 @@ type ReferenceResolver struct {
 	componentRefs map[string]string
 	componentCounter map[string]int
 	pathsBaseDir string
+	fileCache map[string]interface{}
+	componentHashes map[string]string
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
@@ -37,6 +41,8 @@ func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) do
 		components: components,
 		componentRefs: make(map[string]string),
 		componentCounter: componentCounter,
+		fileCache: make(map[string]interface{}),
+		componentHashes: make(map[string]string),
 	}
 }
 
@@ -44,6 +50,8 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 	r.visited = make(map[string]bool)
 	r.rootDoc = data
 	r.pathsBaseDir = ""
+	r.fileCache = make(map[string]interface{})
+	r.componentHashes = make(map[string]string)
 	for _, ct := range componentTypes {
 		r.components[ct] = make(map[string]interface{})
 		r.componentCounter[ct] = 0
@@ -345,6 +353,10 @@ func (r *ReferenceResolver) loadAndParseFile(ctx context.Context, ref string, ba
 		refPath = filepath.Clean(refPath)
 	}
 
+	if cached, ok := r.fileCache[refPath]; ok {
+		return cached, nil
+	}
+
 	data, err := r.fileLoader.Load(ctx, refPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -363,6 +375,7 @@ func (r *ReferenceResolver) loadAndParseFile(ctx context.Context, ref string, ba
 		return nil, fmt.Errorf("failed to parse file: %w", err)
 	}
 
+	r.fileCache[refPath] = content
 	return content, nil
 }
 
@@ -398,12 +411,17 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 			}
 
 			refParts := strings.SplitN(refStr, "#", 2)
+			refPath := refParts[0]
 			fragment := ""
 			if len(refParts) > 1 {
-				fragment = refParts[1]
+				fragment = "#" + refParts[1]
 			}
 
-			if fragment != "" && strings.HasPrefix(fragment, "/components/") {
+			if refPath == "" {
+				return nil
+			}
+
+			if fragment != "" && strings.HasPrefix(fragment, "#/components/") {
 				internalRef, err := r.resolveAndReplaceExternalRef(ctx, refStr, baseDir, config, depth)
 				if err != nil {
 					return fmt.Errorf("failed to replace external ref %s: %w", refStr, err)
@@ -413,6 +431,12 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 					n["$ref"] = internalRef
 				}
 
+				return nil
+			}
+
+			internalRef, err := r.resolveAndReplaceExternalRef(ctx, refStr, baseDir, config, depth)
+			if err == nil && internalRef != "" {
+				n["$ref"] = internalRef
 				return nil
 			}
 
@@ -534,22 +558,27 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 	r.visited[visitedKey] = true
 	defer delete(r.visited, visitedKey)
 
-	data, err := r.fileLoader.Load(ctx, refPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", &ErrFileNotFound{Path: refPath}
-		}
-		return "", fmt.Errorf("failed to load file: %w", err)
-	}
-
-	if config.MaxFileSize > 0 && int64(len(data)) > config.MaxFileSize {
-		return "", fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
-	}
-
-	format := domain.DetectFormat(refPath)
 	var content interface{}
-	if err := r.parser.Unmarshal(data, &content, format); err != nil {
-		return "", fmt.Errorf("failed to parse file: %w", err)
+	if cached, ok := r.fileCache[refPath]; ok {
+		content = cached
+	} else {
+		data, err := r.fileLoader.Load(ctx, refPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return "", &ErrFileNotFound{Path: refPath}
+			}
+			return "", fmt.Errorf("failed to load file: %w", err)
+		}
+
+		if config.MaxFileSize > 0 && int64(len(data)) > config.MaxFileSize {
+			return "", fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
+		}
+
+		format := domain.DetectFormat(refPath)
+		if err := r.parser.Unmarshal(data, &content, format); err != nil {
+			return "", fmt.Errorf("failed to parse file: %w", err)
+		}
+		r.fileCache[refPath] = content
 	}
 
 	var nextBaseDir string
@@ -576,24 +605,34 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 	} else {
 		if contentMap, ok := content.(map[string]interface{}); ok {
 			if comps, ok := contentMap["components"].(map[string]interface{}); ok {
+				totalComponents := 0
+				var foundComponent interface{}
+				var foundType string
 				for _, ct := range componentTypes {
-					if section, ok := comps[ct].(map[string]interface{}); ok && len(section) == 1 {
-						for _, comp := range section {
-							componentContent = comp
-							componentType = ct
-							break
+					if section, ok := comps[ct].(map[string]interface{}); ok {
+						totalComponents += len(section)
+						if len(section) == 1 {
+							for _, comp := range section {
+								foundComponent = comp
+								foundType = ct
+								break
+							}
 						}
-						break
 					}
 				}
-				if componentContent == nil {
-					componentContent = contentMap
+				if totalComponents == 1 && foundComponent != nil {
+					componentContent = foundComponent
+					componentType = foundType
+				} else if totalComponents > 0 {
+					return "", fmt.Errorf("external file contains multiple components, specify fragment: %s", ref)
+				} else {
+					return "", fmt.Errorf("external file does not contain components: %s", ref)
 				}
 			} else {
-				componentContent = contentMap
+				return "", fmt.Errorf("external file does not contain components section: %s", ref)
 			}
 		} else {
-			componentContent = content
+			return "", fmt.Errorf("external file content is not a map: %s", ref)
 		}
 	}
 
@@ -640,11 +679,24 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		return "", fmt.Errorf("failed to process component: %w", err)
 	}
 
+	componentHash := r.hashComponent(componentCopy)
+	if existingName, exists := r.componentHashes[componentHash]; exists {
+		if existingComponent, ok := r.components[componentType][existingName]; ok {
+			if r.componentsEqual(existingComponent, componentCopy) {
+				internalRef := "#/components/" + componentType + "/" + existingName
+				r.componentRefs[visitedKey] = internalRef
+				return internalRef, nil
+			}
+		}
+	}
+
 	if _, exists := section[componentName]; !exists {
 		r.components[componentType][componentName] = componentCopy
+		r.componentHashes[componentHash] = componentName
 	} else {
 		if _, existsInCollected := r.components[componentType][componentName]; !existsInCollected {
 			r.components[componentType][componentName] = componentCopy
+			r.componentHashes[componentHash] = componentName
 		}
 	}
 
@@ -671,22 +723,27 @@ func (r *ReferenceResolver) expandPathRef(ctx context.Context, ref string, baseD
 	r.visited[visitedKey] = true
 	defer delete(r.visited, visitedKey)
 
-	data, err := r.fileLoader.Load(ctx, refPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, &ErrFileNotFound{Path: refPath}
-		}
-		return nil, fmt.Errorf("failed to load file: %w", err)
-	}
-
-	if config.MaxFileSize > 0 && int64(len(data)) > config.MaxFileSize {
-		return nil, fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
-	}
-
-	format := domain.DetectFormat(refPath)
 	var content interface{}
-	if err := r.parser.Unmarshal(data, &content, format); err != nil {
-		return nil, fmt.Errorf("failed to parse file: %w", err)
+	if cached, ok := r.fileCache[refPath]; ok {
+		content = cached
+	} else {
+		data, err := r.fileLoader.Load(ctx, refPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, &ErrFileNotFound{Path: refPath}
+			}
+			return nil, fmt.Errorf("failed to load file: %w", err)
+		}
+
+		if config.MaxFileSize > 0 && int64(len(data)) > config.MaxFileSize {
+			return nil, fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
+		}
+
+		format := domain.DetectFormat(refPath)
+		if err := r.parser.Unmarshal(data, &content, format); err != nil {
+			return nil, fmt.Errorf("failed to parse file: %w", err)
+		}
+		r.fileCache[refPath] = content
 	}
 
 	var nextBaseDir string
@@ -713,7 +770,21 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 	if fragment != "" {
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
 		if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
-			return parts[2]
+			name := parts[2]
+			refPath := strings.Split(ref, "#")[0]
+			if refPath != "" && !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
+				dir := filepath.Dir(refPath)
+				if dir != "." && dir != "/" && !strings.Contains(dir, "/tmp/") && !strings.Contains(dir, "Temp") {
+					pathParts := strings.Split(strings.TrimPrefix(dir, "./"), "/")
+					if len(pathParts) > 0 && pathParts[len(pathParts)-1] != "" {
+						pathPrefix := strings.Join(pathParts, "_")
+						if pathPrefix != "" && pathPrefix != "." {
+							return pathPrefix + "_" + name
+						}
+					}
+				}
+			}
+			return name
 		} else if len(parts) >= 1 {
 			return parts[len(parts)-1]
 		}
@@ -724,7 +795,19 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 		baseName := filepath.Base(refPath)
 		ext := filepath.Ext(baseName)
 		if ext != "" {
-			return strings.TrimSuffix(baseName, ext)
+			baseName = strings.TrimSuffix(baseName, ext)
+		}
+		if !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
+			dir := filepath.Dir(refPath)
+			if dir != "." && dir != "/" && !strings.Contains(dir, "/tmp/") && !strings.Contains(dir, "Temp") {
+				pathParts := strings.Split(strings.TrimPrefix(dir, "./"), "/")
+				if len(pathParts) > 0 && pathParts[len(pathParts)-1] != "" {
+					pathPrefix := strings.Join(pathParts, "_")
+					if pathPrefix != "" && pathPrefix != "." {
+						return pathPrefix + "_" + baseName
+					}
+				}
+			}
 		}
 		return baseName
 	}
@@ -841,4 +924,47 @@ func (r *ReferenceResolver) deepCopy(src interface{}) interface{} {
 	default:
 		return v
 	}
+}
+
+func (r *ReferenceResolver) hashComponent(component interface{}) string {
+	normalized := r.normalizeComponent(component)
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return ""
+	}
+	hash := sha256.Sum256(data)
+	return fmt.Sprintf("%x", hash)
+}
+
+func (r *ReferenceResolver) normalizeComponent(component interface{}) interface{} {
+	switch v := component.(type) {
+	case map[string]interface{}:
+		normalized := make(map[string]interface{})
+		for k, val := range v {
+			if k == "$ref" {
+				continue
+			}
+			normalized[k] = r.normalizeComponent(val)
+		}
+		return normalized
+	case []interface{}:
+		normalized := make([]interface{}, len(v))
+		for i, val := range v {
+			normalized[i] = r.normalizeComponent(val)
+		}
+		return normalized
+	default:
+		return v
+	}
+}
+
+func (r *ReferenceResolver) componentsEqual(a, b interface{}) bool {
+	normalizedA := r.normalizeComponent(a)
+	normalizedB := r.normalizeComponent(b)
+	dataA, errA := json.Marshal(normalizedA)
+	dataB, errB := json.Marshal(normalizedB)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return string(dataA) == string(dataB)
 }
