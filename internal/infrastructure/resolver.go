@@ -69,8 +69,14 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 	for _, ct := range componentTypes {
 		if section, ok := components[ct].(map[string]interface{}); ok {
 			for name, component := range r.components[ct] {
-				if _, exists := section[name]; !exists {
+				if existing, exists := section[name]; !exists {
 					section[name] = component
+				} else {
+					if _, isMap := existing.(map[string]interface{}); !isMap {
+						if _, isComponentMap := component.(map[string]interface{}); isComponentMap {
+							section[name] = component
+						}
+					}
 				}
 			}
 		}
@@ -138,6 +144,24 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 				continue
 			}
 
+			if k == "components" {
+				if componentsMap, ok := v.(map[string]interface{}); ok {
+					componentTypes := []string{"schemas", "responses", "parameters", "examples", "requestBodies", "headers", "securitySchemes", "links", "callbacks"}
+					for _, ct := range componentTypes {
+						if section, ok := componentsMap[ct].(map[string]interface{}); ok {
+							for name, component := range section {
+								if componentMap, ok := component.(map[string]interface{}); ok {
+									if err := r.replaceExternalRefs(ctx, componentMap, baseDir, config, depth); err != nil {
+										return fmt.Errorf("failed to process component %s/%s: %w", ct, name, err)
+									}
+								}
+							}
+						}
+					}
+					continue
+				}
+			}
+
 			if err := r.replaceExternalRefs(ctx, v, baseDir, config, depth); err != nil {
 				return fmt.Errorf("failed to process field %s: %w", k, err)
 			}
@@ -149,6 +173,8 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 				return fmt.Errorf("failed to process array item %d: %w", i, err)
 			}
 		}
+	case string:
+		return nil
 	}
 
 	return nil
@@ -271,6 +297,16 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		}
 	} else {
 		componentName = preferredName
+	}
+
+	if componentContent == nil {
+		return "", fmt.Errorf("component content is nil for ref: %s", ref)
+	}
+
+	if _, ok := componentContent.(map[string]interface{}); !ok {
+		if _, ok := componentContent.([]interface{}); !ok {
+			return "", fmt.Errorf("component content must be an object or array, got %T for ref: %s", componentContent, ref)
+		}
 	}
 
 	if existingRef, ok := r.componentRefs[visitedKey]; ok {
