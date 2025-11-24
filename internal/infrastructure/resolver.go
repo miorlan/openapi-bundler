@@ -82,6 +82,9 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 	for _, ct := range componentTypes {
 		if section, ok := components[ct].(map[string]interface{}); ok {
 			for name, component := range r.components[ct] {
+				if component == nil {
+					continue
+				}
 				if existing, exists := section[name]; !exists {
 					section[name] = component
 				} else {
@@ -97,6 +100,22 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 
 	if err := r.replaceExternalRefs(ctx, data, basePath, config, 0); err != nil {
 		return err
+	}
+
+	r.cleanNilValues(data)
+
+	for _, ct := range componentTypes {
+		if section, ok := components[ct].(map[string]interface{}); ok {
+			if len(section) == 0 {
+				delete(components, ct)
+			}
+		}
+	}
+
+	if componentsMap, ok := data["components"].(map[string]interface{}); ok {
+		if len(componentsMap) == 0 {
+			delete(data, "components")
+		}
 	}
 
 	return nil

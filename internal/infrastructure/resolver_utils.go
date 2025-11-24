@@ -207,7 +207,40 @@ func (r *ReferenceResolver) componentsEqual(a, b interface{}) bool {
 	dataB, errB := json.Marshal(normalizedB)
 	if errA != nil || errB != nil {
 		return false
-	}
+		}
 	return string(dataA) == string(dataB)
+}
+
+func (r *ReferenceResolver) cleanNilValues(node interface{}) interface{} {
+	switch n := node.(type) {
+	case map[string]interface{}:
+		for k, v := range n {
+			if v == nil {
+				delete(n, k)
+				continue
+			}
+			cleaned := r.cleanNilValues(v)
+			if cleaned == nil {
+				delete(n, k)
+				continue
+			}
+			n[k] = cleaned
+		}
+		return n
+	case []interface{}:
+		result := make([]interface{}, 0, len(n))
+		for _, item := range n {
+			if item == nil {
+				continue
+			}
+			cleaned := r.cleanNilValues(item)
+			if cleaned != nil {
+				result = append(result, cleaned)
+			}
+		}
+		return result
+	default:
+		return n
+	}
 }
 

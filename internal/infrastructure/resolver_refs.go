@@ -188,6 +188,10 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 								componentBaseDir = savedBaseDir
 							}
 							for name, component := range section {
+								if component == nil {
+									delete(section, name)
+									continue
+								}
 								if componentStr, ok := component.(string); ok {
 									if !strings.HasPrefix(componentStr, "#") {
 										internalRef, err := r.resolveAndReplaceExternalRef(ctx, componentStr, componentBaseDir, config, depth)
@@ -383,6 +387,9 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 	}
 
 	componentCopy := r.deepCopy(componentContent)
+	if componentCopy == nil {
+		return "", fmt.Errorf("component copy is nil for ref: %s", ref)
+	}
 	if err := r.replaceExternalRefs(ctx, componentCopy, nextBaseDir, config, depth+1); err != nil {
 		return "", fmt.Errorf("failed to process component: %w", err)
 	}
