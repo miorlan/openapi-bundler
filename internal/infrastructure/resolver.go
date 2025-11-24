@@ -15,36 +15,50 @@ type ReferenceResolver struct {
 	parser     domain.Parser
 	visited    map[string]bool
 	rootDoc    map[string]interface{}
-	schemas    map[string]interface{}
-	schemaRefs map[string]string
-	schemaCounter int
+	components map[string]map[string]interface{}
+	componentRefs map[string]string
+	componentCounter map[string]int
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
+	componentTypes := []string{"schemas", "responses", "parameters", "examples", "requestBodies", "headers", "securitySchemes", "links", "callbacks"}
+	components := make(map[string]map[string]interface{})
+	componentCounter := make(map[string]int)
+	for _, ct := range componentTypes {
+		components[ct] = make(map[string]interface{})
+		componentCounter[ct] = 0
+	}
 	return &ReferenceResolver{
 		fileLoader: fileLoader,
 		parser:     parser,
 		visited:    make(map[string]bool),
-		schemas:    make(map[string]interface{}),
-		schemaRefs: make(map[string]string),
-		schemaCounter: 0,
+		components: components,
+		componentRefs: make(map[string]string),
+		componentCounter: componentCounter,
 	}
 }
 
 func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]interface{}, basePath string, config domain.Config) error {
 	r.visited = make(map[string]bool)
 	r.rootDoc = data
-	r.schemas = make(map[string]interface{})
-	r.schemaRefs = make(map[string]string)
-	r.schemaCounter = 0
+	componentTypes := []string{"schemas", "responses", "parameters", "examples", "requestBodies", "headers", "securitySchemes", "links", "callbacks"}
+	for _, ct := range componentTypes {
+		r.components[ct] = make(map[string]interface{})
+		r.componentCounter[ct] = 0
+	}
+	r.componentRefs = make(map[string]string)
 
-	if components, ok := data["components"].(map[string]interface{}); ok {
-		if _, ok := components["schemas"]; !ok {
-			components["schemas"] = make(map[string]interface{})
-		}
+	var components map[string]interface{}
+	if c, ok := data["components"].(map[string]interface{}); ok {
+		components = c
 	} else {
-		data["components"] = map[string]interface{}{
-			"schemas": make(map[string]interface{}),
+		components = make(map[string]interface{})
+		data["components"] = components
+	}
+
+	for _, ct := range componentTypes {
+		if _, ok := components[ct]; !ok {
+			components[ct] = make(map[string]interface{})
 		}
 	}
 
@@ -52,11 +66,13 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 		return err
 	}
 
-	components := data["components"].(map[string]interface{})
-	schemas := components["schemas"].(map[string]interface{})
-	for name, schema := range r.schemas {
-		if _, exists := schemas[name]; !exists {
-			schemas[name] = schema
+	for _, ct := range componentTypes {
+		if section, ok := components[ct].(map[string]interface{}); ok {
+			for name, component := range r.components[ct] {
+				if _, exists := section[name]; !exists {
+					section[name] = component
+				}
+			}
 		}
 	}
 
@@ -161,7 +177,7 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 
 	visitedKey := refPath + fragment
 	if r.visited[visitedKey] {
-		if internalRef, ok := r.schemaRefs[visitedKey]; ok {
+		if internalRef, ok := r.componentRefs[visitedKey]; ok {
 			return internalRef, nil
 		}
 		return "", &domain.ErrCircularReference{Path: visitedKey}
@@ -194,85 +210,96 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		nextBaseDir = filepath.Dir(refPath)
 	}
 
-	var schemaContent interface{}
+	var componentContent interface{}
+	componentType := "schemas"
+	
 	if fragment != "" {
 		extracted, err := r.resolveJSONPointer(content, fragment)
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve fragment %s: %w", fragment, err)
 		}
-		schemaContent = extracted
+		componentContent = extracted
+		
+		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
+		if len(parts) >= 2 && parts[0] == "components" {
+			componentType = parts[1]
+		}
 	} else {
 		if contentMap, ok := content.(map[string]interface{}); ok {
-			if components, ok := contentMap["components"].(map[string]interface{}); ok {
-				if schemas, ok := components["schemas"].(map[string]interface{}); ok {
-					if len(schemas) == 1 {
-						for _, schema := range schemas {
-							schemaContent = schema
+			if comps, ok := contentMap["components"].(map[string]interface{}); ok {
+				componentTypes := []string{"schemas", "responses", "parameters", "examples", "requestBodies", "headers", "securitySchemes", "links", "callbacks"}
+				for _, ct := range componentTypes {
+					if section, ok := comps[ct].(map[string]interface{}); ok && len(section) == 1 {
+						for _, comp := range section {
+							componentContent = comp
+							componentType = ct
 							break
 						}
-					} else if len(schemas) > 1 {
-						return "", fmt.Errorf("file contains multiple schemas, fragment required: %s", ref)
-					} else {
-						schemaContent = contentMap
+						break
 					}
-				} else {
-					schemaContent = contentMap
+				}
+				if componentContent == nil {
+					componentContent = contentMap
 				}
 			} else {
-				schemaContent = contentMap
+				componentContent = contentMap
 			}
 		} else {
-			schemaContent = content
+			componentContent = content
 		}
 	}
 
-	preferredName := r.getPreferredSchemaName(ref, fragment)
+	preferredName := r.getPreferredComponentName(ref, fragment, componentType)
 	components := r.rootDoc["components"].(map[string]interface{})
-	schemas := components["schemas"].(map[string]interface{})
+	section, ok := components[componentType].(map[string]interface{})
+	if !ok {
+		section = make(map[string]interface{})
+		components[componentType] = section
+	}
 
-	var schemaName string
-	if existingSchema, exists := schemas[preferredName]; exists {
-		if existingSchemaMap, ok := existingSchema.(map[string]interface{}); ok {
-			if existingRef, hasRef := existingSchemaMap["$ref"]; hasRef {
+	var componentName string
+	if existingComponent, exists := section[preferredName]; exists {
+		if existingComponentMap, ok := existingComponent.(map[string]interface{}); ok {
+			if existingRef, hasRef := existingComponentMap["$ref"]; hasRef {
 				if existingRefStr, ok := existingRef.(string); ok && existingRefStr == ref {
-					schemaName = preferredName
+					componentName = preferredName
 				}
 			}
 		}
-		if schemaName == "" {
-			schemaName = r.ensureUniqueSchemaName(preferredName, schemas)
+		if componentName == "" {
+			componentName = r.ensureUniqueComponentName(preferredName, section, componentType)
 		}
 	} else {
-		schemaName = preferredName
+		componentName = preferredName
 	}
 
-	if existingRef, ok := r.schemaRefs[visitedKey]; ok {
+	if existingRef, ok := r.componentRefs[visitedKey]; ok {
 		return existingRef, nil
 	}
 
-	schemaCopy := r.deepCopy(schemaContent)
-	if err := r.replaceExternalRefs(ctx, schemaCopy, nextBaseDir, config, depth+1); err != nil {
-		return "", fmt.Errorf("failed to process schema: %w", err)
+	componentCopy := r.deepCopy(componentContent)
+	if err := r.replaceExternalRefs(ctx, componentCopy, nextBaseDir, config, depth+1); err != nil {
+		return "", fmt.Errorf("failed to process component: %w", err)
 	}
 
-	if _, exists := schemas[schemaName]; !exists {
-		r.schemas[schemaName] = schemaCopy
+	if _, exists := section[componentName]; !exists {
+		r.components[componentType][componentName] = componentCopy
 	} else {
-		if _, existsInCollected := r.schemas[schemaName]; !existsInCollected {
-			r.schemas[schemaName] = schemaCopy
+		if _, existsInCollected := r.components[componentType][componentName]; !existsInCollected {
+			r.components[componentType][componentName] = componentCopy
 		}
 	}
 
-	internalRef := "#/components/schemas/" + schemaName
-	r.schemaRefs[visitedKey] = internalRef
+	internalRef := "#/components/" + componentType + "/" + componentName
+	r.componentRefs[visitedKey] = internalRef
 
 	return internalRef, nil
 }
 
-func (r *ReferenceResolver) getPreferredSchemaName(ref, fragment string) string {
+func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentType string) string {
 	if fragment != "" {
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
-		if len(parts) >= 3 && parts[0] == "components" && parts[1] == "schemas" {
+		if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
 			return parts[2]
 		} else if len(parts) >= 1 {
 			return parts[len(parts)-1]
@@ -289,16 +316,20 @@ func (r *ReferenceResolver) getPreferredSchemaName(ref, fragment string) string 
 		return baseName
 	}
 
-	r.schemaCounter++
-	return fmt.Sprintf("Schema%d", r.schemaCounter)
+	r.componentCounter[componentType]++
+	baseName := componentType[:len(componentType)-1]
+	if len(baseName) > 0 {
+		baseName = strings.ToUpper(baseName[:1]) + baseName[1:]
+	}
+	return fmt.Sprintf("%s%d", baseName, r.componentCounter[componentType])
 }
 
-func (r *ReferenceResolver) ensureUniqueSchemaName(preferredName string, schemas map[string]interface{}) string {
+func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, section map[string]interface{}, componentType string) string {
 	name := preferredName
 	counter := 0
 	for {
-		if _, exists := schemas[name]; !exists {
-			if _, existsInCollected := r.schemas[name]; !existsInCollected {
+		if _, exists := section[name]; !exists {
+			if _, existsInCollected := r.components[componentType][name]; !existsInCollected {
 				return name
 			}
 		}
