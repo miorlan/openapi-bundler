@@ -621,7 +621,10 @@ func TestReferenceResolver_ExpandSectionWithNestedRefs(t *testing.T) {
 		t.Fatalf("Failed to create schemas directory: %v", err)
 	}
 	
-	externalSchemaFile := filepath.Join(tmpDir, "external.yaml")
+	externalSchemaFile := filepath.Join(tmpDir, "schemas", "external.yaml")
+	if err := os.MkdirAll(filepath.Dir(externalSchemaFile), 0755); err != nil {
+		t.Fatalf("Failed to create schemas directory: %v", err)
+	}
 	externalContent := []byte(`type: object
 properties:
   external_field:
@@ -693,12 +696,8 @@ properties:
 		t.Fatalf("$ref should be a string, got %T", ref)
 	}
 
-	if strings.HasPrefix(refStr, "./external.yaml") {
-		t.Logf("Note: external ref in properties is preserved (properties are skipped to prevent inlining)")
-	}
-	
-	if !strings.HasPrefix(refStr, "#/components/schemas/") && !strings.HasPrefix(refStr, "./") {
-		t.Errorf("$ref should be an internal reference or external, got %s", refStr)
+	if !strings.HasPrefix(refStr, "#/components/schemas/") {
+		t.Errorf("$ref should be an internal reference, got %s", refStr)
 	}
 }
 
