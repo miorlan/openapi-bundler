@@ -14,7 +14,9 @@ type ReferenceResolver struct {
 	fileLoader domain.FileLoader
 	parser     domain.Parser
 	visited    map[string]bool
-	rootDoc    interface{} // Корневой документ для разрешения внутренних ссылок
+	rootDoc    map[string]interface{}
+	schemas    map[string]interface{} // Собранные схемы из внешних файлов
+	schemaRefs map[string]string      // Маппинг внешних ссылок на внутренние
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
@@ -22,20 +24,52 @@ func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) do
 		fileLoader: fileLoader,
 		parser:     parser,
 		visited:    make(map[string]bool),
+		schemas:    make(map[string]interface{}),
+		schemaRefs: make(map[string]string),
 	}
 }
 
 func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]interface{}, basePath string, config domain.Config) error {
 	r.visited = make(map[string]bool)
-	r.rootDoc = data // Сохраняем корневой документ для разрешения внутренних ссылок
-	return r.resolveRefs(ctx, data, basePath, config, 0)
+	r.rootDoc = data
+	r.schemas = make(map[string]interface{})
+	r.schemaRefs = make(map[string]string)
+
+	// Инициализируем components/schemas если его нет
+	if components, ok := data["components"].(map[string]interface{}); ok {
+		if _, ok := components["schemas"]; !ok {
+			components["schemas"] = make(map[string]interface{})
+		}
+	} else {
+		data["components"] = map[string]interface{}{
+			"schemas": make(map[string]interface{}),
+		}
+	}
+
+	// Собираем все внешние схемы и заменяем ссылки
+	if err := r.collectSchemasAndReplaceRefs(ctx, data, basePath, config, 0, false); err != nil {
+		return err
+	}
+
+	// Добавляем собранные схемы в components/schemas
+	components := data["components"].(map[string]interface{})
+	schemas := components["schemas"].(map[string]interface{})
+	for name, schema := range r.schemas {
+		if _, exists := schemas[name]; !exists {
+			schemas[name] = schema
+		}
+	}
+
+	return nil
 }
 
 func (r *ReferenceResolver) Resolve(ctx context.Context, ref string, basePath string, config domain.Config) (interface{}, error) {
 	return r.resolveRef(ctx, ref, basePath, config, 0)
 }
 
-func (r *ReferenceResolver) resolveRefs(ctx context.Context, node interface{}, baseDir string, config domain.Config, depth int) error {
+// collectSchemasAndReplaceRefs собирает схемы из внешних файлов и заменяет внешние $ref на внутренние
+// inSchemas указывает, находимся ли мы внутри components/schemas
+func (r *ReferenceResolver) collectSchemasAndReplaceRefs(ctx context.Context, node interface{}, baseDir string, config domain.Config, depth int, inSchemas bool) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -46,75 +80,100 @@ func (r *ReferenceResolver) resolveRefs(ctx context.Context, node interface{}, b
 
 	switch n := node.(type) {
 	case map[string]interface{}:
+		// Пропускаем allOf/oneOf/anyOf - не разворачиваем их
+		if _, hasAllOf := n["allOf"]; hasAllOf {
+			// Обрабатываем только ссылки внутри allOf, но не разворачиваем сам allOf
+			if allOf, ok := n["allOf"].([]interface{}); ok {
+				for _, item := range allOf {
+					if err := r.collectSchemasAndReplaceRefs(ctx, item, baseDir, config, depth+1, inSchemas); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+		if _, hasOneOf := n["oneOf"]; hasOneOf {
+			if oneOf, ok := n["oneOf"].([]interface{}); ok {
+				for _, item := range oneOf {
+					if err := r.collectSchemasAndReplaceRefs(ctx, item, baseDir, config, depth+1, inSchemas); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+		if _, hasAnyOf := n["anyOf"]; hasAnyOf {
+			if anyOf, ok := n["anyOf"].([]interface{}); ok {
+				for _, item := range anyOf {
+					if err := r.collectSchemasAndReplaceRefs(ctx, item, baseDir, config, depth+1, inSchemas); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+
+		// Проверяем, находимся ли мы в components/schemas
+		if _, isSchemas := n["schemas"]; isSchemas {
+			inSchemas = true
+		}
+
+		// Обрабатываем $ref
 		if refVal, ok := n["$ref"]; ok {
 			refStr, ok := refVal.(string)
 			if !ok {
 				return &domain.ErrInvalidReference{Ref: fmt.Sprintf("%v", refVal)}
 			}
 
+			// Внутренние ссылки оставляем как есть
 			if strings.HasPrefix(refStr, "#") {
-				if r.rootDoc == nil {
-					return fmt.Errorf("cannot resolve internal reference %s: root document not available", refStr)
-				}
-				resolved, err := r.resolveJSONPointer(r.rootDoc, refStr)
-				if err != nil {
-					return fmt.Errorf("failed to resolve internal reference %s: %w", refStr, err)
-				}
-				resolvedCopy := r.deepCopy(resolved)
+				// Рекурсивно обрабатываем содержимое по ссылке, но не инлайним
+				return nil
+			}
+
+		// Внешние ссылки заменяем на внутренние
+		internalRef, schemaContent, err := r.replaceExternalRef(ctx, refStr, baseDir, config, depth)
+		if err != nil {
+			return fmt.Errorf("failed to replace external ref %s: %w", refStr, err)
+		}
+
+		if internalRef != "" {
+			// Если текущий узел содержит только $ref (и больше ничего),
+			// и мы находимся в components/schemas, заменяем содержимое вместо создания ссылки
+			if len(n) == 1 && schemaContent != nil && inSchemas {
+				// Заменяем содержимое
 				for k := range n {
 					delete(n, k)
 				}
-				if resolvedMap, ok := resolvedCopy.(map[string]interface{}); ok {
-					for k, v := range resolvedMap {
+				if schemaMap, ok := schemaContent.(map[string]interface{}); ok {
+					for k, v := range schemaMap {
 						n[k] = v
 					}
-					return r.resolveRefs(ctx, n, baseDir, config, depth+1)
 				}
 				return nil
 			}
-
-			resolved, err := r.resolveRef(ctx, refStr, baseDir, config, depth)
-			if err != nil {
-				return fmt.Errorf("failed to resolve $ref %s: %w", refStr, err)
-			}
-
-			if resolved == nil {
-				return nil
-			}
-
-			for k := range n {
-				delete(n, k)
-			}
-			if resolvedMap, ok := resolved.(map[string]interface{}); ok {
-				for k, v := range resolvedMap {
-					n[k] = v
-				}
-				refPath := r.getRefPath(refStr, baseDir)
-				if refPath != "" {
-					var nextBaseDir string
-					if strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") {
-						nextBaseDir = refPath[:strings.LastIndex(refPath, "/")+1]
-					} else {
-						refPath = filepath.Clean(refPath)
-						nextBaseDir = filepath.Dir(refPath)
-					}
-					return r.resolveRefs(ctx, n, nextBaseDir, config, depth+1)
-				}
-				return r.resolveRefs(ctx, n, baseDir, config, depth+1)
-			}
-			return nil
+			// Создаем ссылку
+			n["$ref"] = internalRef
 		}
 
+		return nil
+		}
+
+		// Рекурсивно обрабатываем все остальные поля
 		for k, v := range n {
-			if err := r.resolveRefs(ctx, v, baseDir, config, depth); err != nil {
-				return fmt.Errorf("failed to resolve refs in %s: %w", k, err)
+			childInSchemas := inSchemas
+			if k == "schemas" {
+				childInSchemas = true
+			}
+			if err := r.collectSchemasAndReplaceRefs(ctx, v, baseDir, config, depth, childInSchemas); err != nil {
+				return fmt.Errorf("failed to process field %s: %w", k, err)
 			}
 		}
 
 	case []interface{}:
 		for i, item := range n {
-			if err := r.resolveRefs(ctx, item, baseDir, config, depth); err != nil {
-				return fmt.Errorf("failed to resolve refs in array item %d: %w", i, err)
+			if err := r.collectSchemasAndReplaceRefs(ctx, item, baseDir, config, depth, inSchemas); err != nil {
+				return fmt.Errorf("failed to process array item %d: %w", i, err)
 			}
 		}
 	}
@@ -122,7 +181,9 @@ func (r *ReferenceResolver) resolveRefs(ctx context.Context, node interface{}, b
 	return nil
 }
 
-func (r *ReferenceResolver) resolveRef(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (interface{}, error) {
+// replaceExternalRef заменяет внешнюю ссылку на внутреннюю и собирает схемы
+// Возвращает внутреннюю ссылку и содержимое схемы
+func (r *ReferenceResolver) replaceExternalRef(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (string, interface{}, error) {
 	refParts := strings.SplitN(ref, "#", 2)
 	refPath := refParts[0]
 	fragment := ""
@@ -130,17 +191,13 @@ func (r *ReferenceResolver) resolveRef(ctx context.Context, ref string, baseDir 
 		fragment = "#" + refParts[1]
 	}
 
-	if refPath == "" && fragment != "" {
-		return nil, nil
-	}
-
-	if strings.HasPrefix(ref, "#") {
-		return nil, nil
+	if refPath == "" {
+		return "", nil, nil
 	}
 
 	refPath = r.getRefPath(refPath, baseDir)
 	if refPath == "" {
-		return nil, &domain.ErrInvalidReference{Ref: ref}
+		return "", nil, &domain.ErrInvalidReference{Ref: ref}
 	}
 
 	if !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
@@ -149,36 +206,38 @@ func (r *ReferenceResolver) resolveRef(ctx context.Context, ref string, baseDir 
 
 	visitedKey := refPath + fragment
 	if r.visited[visitedKey] {
-		return nil, &domain.ErrCircularReference{Path: visitedKey}
+		// Если уже обработали, возвращаем сохраненную внутреннюю ссылку
+		if internalRef, ok := r.schemaRefs[visitedKey]; ok {
+			schemaName := r.getSchemaName(ref, fragment)
+			if schemaName != "" {
+				if schema, exists := r.schemas[schemaName]; exists {
+					return internalRef, schema, nil
+				}
+			}
+			return internalRef, nil, nil
+		}
+		return "", nil, &domain.ErrCircularReference{Path: visitedKey}
 	}
 	r.visited[visitedKey] = true
 	defer delete(r.visited, visitedKey)
 
+	// Загружаем внешний файл
 	data, err := r.fileLoader.Load(ctx, refPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, &ErrFileNotFound{Path: refPath}
+			return "", nil, &ErrFileNotFound{Path: refPath}
 		}
-		return nil, fmt.Errorf("failed to read file: %w", err)
+		return "", nil, fmt.Errorf("failed to load file: %w", err)
 	}
 
 	if config.MaxFileSize > 0 && int64(len(data)) > config.MaxFileSize {
-		return nil, fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
+		return "", nil, fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
 	}
 
 	format := domain.DetectFormat(refPath)
-
 	var content interface{}
 	if err := r.parser.Unmarshal(data, &content, format); err != nil {
-		return nil, fmt.Errorf("failed to parse file: %w", err)
-	}
-
-	if fragment != "" {
-		extracted, err := r.resolveJSONPointer(content, fragment)
-		if err != nil {
-			return nil, fmt.Errorf("failed to resolve fragment %s: %w", fragment, err)
-		}
-		content = extracted
+		return "", nil, fmt.Errorf("failed to parse file: %w", err)
 	}
 
 	var nextBaseDir string
@@ -188,19 +247,102 @@ func (r *ReferenceResolver) resolveRef(ctx context.Context, ref string, baseDir 
 		nextBaseDir = filepath.Dir(refPath)
 	}
 
-	originalRootDoc := r.rootDoc
+	// Если есть фрагмент, извлекаем только нужную схему
+	if fragment != "" {
+		extracted, err := r.resolveJSONPointer(content, fragment)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to resolve fragment %s: %w", fragment, err)
+		}
+
+		// Определяем имя схемы из фрагмента
+		schemaName := r.getSchemaName(ref, fragment)
+		if schemaName == "" {
+			return "", nil, fmt.Errorf("cannot determine schema name for ref: %s", ref)
+		}
+
+		// Если схема уже собрана, возвращаем ссылку на неё
+		if existingRef, ok := r.schemaRefs[visitedKey]; ok {
+			if schema, exists := r.schemas[schemaName]; exists {
+				return existingRef, schema, nil
+			}
+			return existingRef, nil, nil
+		}
+
+		// Обрабатываем ссылки внутри извлеченной схемы
+		if err := r.collectSchemasAndReplaceRefs(ctx, extracted, nextBaseDir, config, depth+1, false); err != nil {
+			return "", nil, fmt.Errorf("failed to process schema: %w", err)
+		}
+
+		// Сохраняем схему
+		r.schemas[schemaName] = extracted
+		internalRef := "#/components/schemas/" + schemaName
+		r.schemaRefs[visitedKey] = internalRef
+
+		return internalRef, extracted, nil
+	}
+
+	// Если нет фрагмента, загружаем весь файл и извлекаем все схемы из components/schemas
 	if contentMap, ok := content.(map[string]interface{}); ok {
-		r.rootDoc = contentMap
+		if components, ok := contentMap["components"].(map[string]interface{}); ok {
+			if schemas, ok := components["schemas"].(map[string]interface{}); ok {
+				// Обрабатываем все схемы из внешнего файла
+				for schemaName, schema := range schemas {
+					// Обрабатываем ссылки внутри схемы
+					if err := r.collectSchemasAndReplaceRefs(ctx, schema, nextBaseDir, config, depth+1, false); err != nil {
+						return "", nil, fmt.Errorf("failed to process schema %s: %w", schemaName, err)
+					}
+
+					// Сохраняем схему, если её еще нет
+					if _, exists := r.schemas[schemaName]; !exists {
+						r.schemas[schemaName] = schema
+					}
+				}
+			}
+		}
+
+		// Обрабатываем остальные ссылки в файле (например, в paths)
+		if err := r.collectSchemasAndReplaceRefs(ctx, content, nextBaseDir, config, depth+1, false); err != nil {
+			return "", nil, fmt.Errorf("failed to process external file: %w", err)
+		}
 	}
 
-	if err := r.resolveRefs(ctx, content, nextBaseDir, config, depth+1); err != nil {
-		r.rootDoc = originalRootDoc
-		return nil, fmt.Errorf("failed to resolve refs in loaded file: %w", err)
+	// Если ссылка указывает на весь файл без фрагмента, возвращаем пустую строку
+	// (схемы уже добавлены в r.schemas)
+	return "", nil, nil
+}
+
+// getSchemaName извлекает имя схемы из ссылки
+func (r *ReferenceResolver) getSchemaName(ref, fragment string) string {
+	if fragment != "" {
+		// Извлекаем имя из фрагмента, например: #/components/schemas/User -> User
+		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
+		if len(parts) >= 3 && parts[0] == "components" && parts[1] == "schemas" {
+			return parts[2]
+		}
+		// Если фрагмент указывает на схему напрямую
+		if len(parts) >= 1 {
+			return parts[len(parts)-1]
+		}
 	}
 
-	r.rootDoc = originalRootDoc
+	// Если нет фрагмента, пытаемся извлечь имя из пути файла
+	refPath := strings.Split(ref, "#")[0]
+	if refPath != "" {
+		baseName := filepath.Base(refPath)
+		ext := filepath.Ext(baseName)
+		if ext != "" {
+			return strings.TrimSuffix(baseName, ext)
+		}
+		return baseName
+	}
 
-	return content, nil
+	return ""
+}
+
+func (r *ReferenceResolver) resolveRef(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (interface{}, error) {
+	// Этот метод используется только для Resolve, но теперь мы не инлайним ссылки
+	// Возвращаем nil, так как основная логика в collectSchemasAndReplaceRefs
+	return nil, nil
 }
 
 // resolveJSONPointer извлекает значение по JSON Pointer (RFC 6901)
