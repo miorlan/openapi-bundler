@@ -12,7 +12,7 @@ help: ## Показать справку
 
 build: ## Собрать бинарный файл
 	@echo "🔨 Сборка $(BINARY_NAME)..."
-	@go build -o $(BINARY_NAME) ./cmd/openapi-bundler
+	@go build -o $(BINARY_NAME) ./cmd
 	@echo "✅ Готово: ./$(BINARY_NAME)"
 
 install: build ## Установить в $(INSTALL_PATH)

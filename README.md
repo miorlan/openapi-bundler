@@ -15,11 +15,38 @@ CLI утилита и библиотека для объединения (bundli
 
 ### CLI утилита
 
+**Способ 1: Установка через go install (рекомендуется)**
+
 ```bash
-go install github.com/miorlan/openapi-bundler/cmd/openapi-bundler@latest
+go install github.com/miorlan/openapi-bundler/cmd@latest
 ```
 
-После установки убедитесь, что `$(go env GOPATH)/bin` находится в вашем `PATH`.
+После установки бинарник будет в `$(go env GOPATH)/bin/cmd`. Рекомендуется создать симлинк или алиас:
+
+```bash
+# Создайте симлинк с удобным именем
+ln -s $(go env GOPATH)/bin/cmd $(go env GOPATH)/bin/openapi-bundler
+
+# Или добавьте алиас в ~/.bashrc или ~/.zshrc
+alias openapi-bundler='$(go env GOPATH)/bin/cmd'
+```
+
+**Способ 2: Сборка из исходников (рекомендуется для удобства)**
+
+```bash
+# Клонируйте репозиторий
+git clone https://github.com/miorlan/openapi-bundler.git
+cd openapi-bundler
+
+# Соберите бинарник
+make build
+
+# Или напрямую
+go build -o openapi-bundler ./cmd
+
+# Используйте
+./openapi-bundler version
+```
 
 ### Установка man pages (опционально)
 
@@ -155,7 +182,7 @@ openapi-bundler bundle -i api/openapi/index.yaml -o api/openapi/openapi.yaml
 ```makefile
 api:
 	@if ! command -v openapi-bundler >/dev/null 2>&1; then \
-		echo "openapi-bundler не найден. Установи: go install github.com/miorlan/openapi-bundler/cmd/openapi-bundler@latest"; \
+		echo "openapi-bundler не найден. Установи: go install github.com/miorlan/openapi-bundler/cmd@latest"; \
 		exit 1; \
 	fi
 	openapi-bundler bundle -i api/openapi/index.yaml -o api/openapi/openapi.yaml

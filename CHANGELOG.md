@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive test coverage
 - Clean architecture implementation
 - Public API in `bundler` package
-- CLI utility in `cmd/openapi-bundler`
+- CLI utility in `cmd/`
 
 ### Security
 - Path traversal protection for local files
