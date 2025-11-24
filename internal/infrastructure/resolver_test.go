@@ -701,6 +701,78 @@ properties:
 	}
 }
 
+func TestReferenceResolver_ResolveAll_AllOfWithExternalRef(t *testing.T) {
+	tmpDir := t.TempDir()
+	
+	externalFile := filepath.Join(tmpDir, "external.yaml")
+	externalContent := []byte(`type: object
+properties:
+  external_field:
+    type: string
+`)
+	if err := os.WriteFile(externalFile, externalContent, 0644); err != nil {
+		t.Fatalf("Failed to create external file: %v", err)
+	}
+
+	loader := NewFileLoader()
+	parser := NewParser()
+	resolver := NewReferenceResolver(loader, parser)
+
+	data := map[string]interface{}{
+		"openapi": "3.0.0",
+		"components": map[string]interface{}{
+			"schemas": map[string]interface{}{
+				"TestSchema": map[string]interface{}{
+					"type": "object",
+					"allOf": []interface{}{
+						map[string]interface{}{
+							"$ref": externalFile,
+						},
+						map[string]interface{}{
+							"properties": map[string]interface{}{
+								"local_field": map[string]interface{}{
+									"type": "string",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	config := domain.Config{MaxDepth: 10}
+
+	err := resolver.ResolveAll(ctx, data, tmpDir, config)
+	if err != nil {
+		t.Fatalf("ResolveAll() error = %v", err)
+	}
+
+	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
+	testSchema := schemas["TestSchema"].(map[string]interface{})
+	allOf := testSchema["allOf"].([]interface{})
+	
+	if len(allOf) != 2 {
+		t.Fatalf("allOf should have 2 items, got %d", len(allOf))
+	}
+
+	firstItem := allOf[0].(map[string]interface{})
+	ref, hasRef := firstItem["$ref"]
+	if !hasRef {
+		t.Error("first allOf item should contain $ref")
+	}
+
+	refStr, ok := ref.(string)
+	if !ok {
+		t.Fatalf("$ref should be a string, got %T", ref)
+	}
+
+	if !strings.HasPrefix(refStr, "#/components/schemas/") {
+		t.Errorf("$ref should be an internal reference, got %s", refStr)
+	}
+}
+
 func TestReferenceResolver_ExpandSectionWithRelativeRefs(t *testing.T) {
 	tmpDir := t.TempDir()
 	
