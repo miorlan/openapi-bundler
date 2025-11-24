@@ -137,16 +137,14 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 
 			if err != nil {
 				expanded, expandErr := r.expandPathRef(ctx, refStr, baseDir, config, depth)
-				if expandErr != nil {
-					return fmt.Errorf("failed to replace external ref %s: %w", refStr, err)
-				}
-
-				if expanded != nil {
+				if expandErr == nil && expanded != nil {
 					for k, v := range expanded {
 						n[k] = v
 					}
 					delete(n, "$ref")
+					return nil
 				}
+				return fmt.Errorf("failed to replace external ref %s: %w", refStr, err)
 			}
 
 			return nil
@@ -161,6 +159,17 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 					}
 					for pathKey, pathValue := range pathsMap {
 						if pathMap, ok := pathValue.(map[string]interface{}); ok {
+							if refVal, hasRef := pathMap["$ref"]; hasRef {
+								if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
+									expanded, expandErr := r.expandPathRef(ctx, refStr, pathsBaseDir, config, depth)
+									if expandErr == nil && expanded != nil {
+										for k, v := range expanded {
+											pathMap[k] = v
+										}
+										delete(pathMap, "$ref")
+									}
+								}
+							}
 							if err := r.replaceExternalRefs(ctx, pathMap, pathsBaseDir, config, depth); err != nil {
 								return fmt.Errorf("failed to process path %s: %w", pathKey, err)
 							}
@@ -174,7 +183,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 				if componentsMap, ok := v.(map[string]interface{}); ok {
 					for _, ct := range componentTypes {
 						if section, ok := componentsMap[ct].(map[string]interface{}); ok {
-							componentBaseDir := baseDir
+							componentBaseDir := r.rootBasePath
 							if savedBaseDir, exists := r.componentsBaseDir[ct]; exists && savedBaseDir != "" {
 								componentBaseDir = savedBaseDir
 							}

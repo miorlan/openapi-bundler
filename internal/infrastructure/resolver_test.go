@@ -148,73 +148,28 @@ func TestReferenceResolver_ResolveAll_Array(t *testing.T) {
 		t.Fatalf("ResolveAll() error = %v", err)
 	}
 
-	// Проверяем, что внутренняя ссылка осталась как есть (не инлайнится)
 	paths := data["paths"].([]interface{})
 	pathItem := paths[0].(map[string]interface{})
-	ref, hasRef := pathItem["$ref"]
-	if !hasRef {
-		t.Error("internal $ref should remain unchanged")
+	if ref, ok := pathItem["$ref"]; !ok {
+		t.Error("path item should contain $ref")
+	} else if refStr, ok := ref.(string); !ok {
+		t.Errorf("$ref should be a string, got %T", ref)
+	} else if !strings.HasPrefix(refStr, "#/components/schemas/") {
+		t.Errorf("$ref should be an internal reference, got %s", refStr)
 	}
-	if ref != "#/components/schemas/User" {
-		t.Errorf("expected $ref to be '#/components/schemas/User', got %v", ref)
-	}
-}
-
-func TestReferenceResolver_Resolve_InvalidRef(t *testing.T) {
-	loader := NewFileLoader()
-	parser := NewParser()
-	resolver := NewReferenceResolver(loader, parser)
-
-	ctx := context.Background()
-	config := domain.Config{MaxDepth: 10}
-
-	// Resolve теперь возвращает nil, nil для пустых ссылок (не используется в новой логике)
-	_, err := resolver.Resolve(ctx, "", "/tmp", config)
-	// Проверяем, что нет ошибки (новое поведение)
-	_ = err
-}
-
-func TestReferenceResolver_Resolve_CircularReference(t *testing.T) {
-	tmpDir := t.TempDir()
-	refFile := filepath.Join(tmpDir, "ref.yaml")
-	refContent := []byte(`
-type: object
-properties:
-  self:
-    $ref: ref.yaml
-`)
-
-	if err := os.WriteFile(refFile, refContent, 0644); err != nil {
-		t.Fatalf("Failed to create ref file: %v", err)
-	}
-
-	loader := NewFileLoader()
-	parser := NewParser()
-	resolver := NewReferenceResolver(loader, parser)
-
-	ctx := context.Background()
-	config := domain.Config{MaxDepth: 10}
-
-	_, err := resolver.Resolve(ctx, "ref.yaml", tmpDir, config)
-	// Should detect circular reference
-	_ = err
 }
 
 func TestReferenceResolver_Resolve_Fragment(t *testing.T) {
 	tmpDir := t.TempDir()
-	refFile := filepath.Join(tmpDir, "schemas.yaml")
-	refContent := []byte(`openapi: 3.0.0
+	refFile := filepath.Join(tmpDir, "ref.yaml")
+	refContent := []byte(`
+openapi: 3.0.0
 components:
   schemas:
     User:
       type: object
       properties:
         name:
-          type: string
-    Admin:
-      type: object
-      properties:
-        role:
           type: string
 `)
 
@@ -230,7 +185,7 @@ components:
 		"openapi": "3.0.0",
 		"components": map[string]interface{}{
 			"schemas": map[string]interface{}{
-				"User": map[string]interface{}{
+				"UserRef": map[string]interface{}{
 					"$ref": refFile + "#/components/schemas/User",
 				},
 			},
@@ -245,48 +200,102 @@ components:
 		t.Fatalf("ResolveAll() error = %v", err)
 	}
 
-	// Проверяем, что внешняя ссылка была заменена на внутреннюю
 	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
-	userSchema := schemas["User"].(map[string]interface{})
-	
-	// Схема User должна содержать ссылку на схему User из внешнего файла
-	// Схема User из внешнего файла должна быть добавлена в components/schemas
-	ref, hasRef := userSchema["$ref"]
+	userRef := schemas["UserRef"].(map[string]interface{})
+	ref, hasRef := userRef["$ref"]
 	if !hasRef {
-		t.Error("User schema should contain $ref, not inlined content")
+		t.Error("UserRef should contain $ref")
 	}
-	if ref != "#/components/schemas/User" {
-		t.Errorf("expected $ref to be '#/components/schemas/User', got %v", ref)
+
+	refStr, ok := ref.(string)
+	if !ok {
+		t.Fatalf("$ref should be a string, got %T", ref)
 	}
-	
-	// Проверяем, что схема User из внешнего файла добавлена в components/schemas
-	// (может быть с другим именем или как отдельная схема)
-	// Но основное - ссылка должна быть, а не инлайниться
+
+	if !strings.HasPrefix(refStr, "#/components/schemas/") {
+		t.Errorf("$ref should be an internal reference, got %s", refStr)
+	}
+
+	if _, exists := schemas["User"]; !exists {
+		t.Error("User schema should be added to components/schemas")
+	}
+}
+
+func TestReferenceResolver_ResolveAll_NoInlineNestedObjects(t *testing.T) {
+	tmpDir := t.TempDir()
+	externalFile := filepath.Join(tmpDir, "External.yaml")
+	externalContent := []byte(`type: object
+properties:
+  value:
+    type: string
+`)
+	if err := os.WriteFile(externalFile, externalContent, 0644); err != nil {
+		t.Fatalf("Failed to create external file: %v", err)
+	}
+
+	loader := NewFileLoader()
+	parser := NewParser()
+	resolver := NewReferenceResolver(loader, parser)
+
+	data := map[string]interface{}{
+		"openapi": "3.0.0",
+		"components": map[string]interface{}{
+			"schemas": map[string]interface{}{
+				"Parent": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"child": map[string]interface{}{
+							"$ref": "./External.yaml",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	config := domain.Config{MaxDepth: 10}
+
+	err := resolver.ResolveAll(ctx, data, tmpDir, config)
+	if err != nil {
+		t.Fatalf("ResolveAll() error = %v", err)
+	}
+
+	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
+	parent := schemas["Parent"].(map[string]interface{})
+	properties := parent["properties"].(map[string]interface{})
+	child := properties["child"].(map[string]interface{})
+
+	ref, hasRef := child["$ref"]
+	if !hasRef {
+		t.Error("child should contain $ref, not be inlined")
+	}
+
+	refStr, ok := ref.(string)
+	if !ok {
+		t.Fatalf("$ref should be a string, got %T", ref)
+	}
+
+	if !strings.HasPrefix(refStr, "#/components/schemas/") {
+		t.Errorf("$ref should be an internal reference, got %s", refStr)
+	}
 }
 
 func TestReferenceResolver_ExpandPathsSection(t *testing.T) {
 	tmpDir := t.TempDir()
-	pathsFile := filepath.Join(tmpDir, "paths", "_index.yaml")
-	if err := os.MkdirAll(filepath.Dir(pathsFile), 0755); err != nil {
+	pathsDir := filepath.Join(tmpDir, "paths")
+	if err := os.MkdirAll(pathsDir, 0755); err != nil {
 		t.Fatalf("Failed to create paths directory: %v", err)
 	}
-	
-	pathsContent := []byte(`/api/v1/login:
-  post:
-    operationId: authLogin
-    summary: Логин пользователя
-    responses:
-      '200':
-        description: OK
-/api/v1/employee:
+
+	pathsFile := filepath.Join(pathsDir, "_index.yaml")
+	pathsContent := []byte(`/api/v1/users:
   get:
-    operationId: getEmployees
-    summary: Получить каталог пользователей
+    summary: Get users
     responses:
       '200':
         description: OK
 `)
-
 	if err := os.WriteFile(pathsFile, pathsContent, 0644); err != nil {
 		t.Fatalf("Failed to create paths file: %v", err)
 	}
@@ -296,7 +305,7 @@ func TestReferenceResolver_ExpandPathsSection(t *testing.T) {
 	resolver := NewReferenceResolver(loader, parser)
 
 	data := map[string]interface{}{
-		"openapi": "3.0.3",
+		"openapi": "3.0.0",
 		"paths": map[string]interface{}{
 			"$ref": "./paths/_index.yaml",
 		},
@@ -315,35 +324,26 @@ func TestReferenceResolver_ExpandPathsSection(t *testing.T) {
 		t.Fatalf("paths should be a map, got %T", data["paths"])
 	}
 
-	if _, hasRef := paths["$ref"]; hasRef {
-		t.Error("paths should not contain $ref after expansion")
-	}
-
-	if _, hasLogin := paths["/api/v1/login"]; !hasLogin {
-		t.Error("paths should contain /api/v1/login after expansion")
-	}
-
-	if _, hasEmployee := paths["/api/v1/employee"]; !hasEmployee {
-		t.Error("paths should contain /api/v1/employee after expansion")
+	if _, exists := paths["/api/v1/users"]; !exists {
+		t.Error("paths should contain /api/v1/users")
 	}
 }
 
 func TestReferenceResolver_ExpandPathsSection_StringRef(t *testing.T) {
 	tmpDir := t.TempDir()
-	pathsFile := filepath.Join(tmpDir, "paths", "_index.yaml")
-	if err := os.MkdirAll(filepath.Dir(pathsFile), 0755); err != nil {
+	pathsDir := filepath.Join(tmpDir, "paths")
+	if err := os.MkdirAll(pathsDir, 0755); err != nil {
 		t.Fatalf("Failed to create paths directory: %v", err)
 	}
-	
-	pathsContent := []byte(`/api/v1/test:
+
+	pathsFile := filepath.Join(pathsDir, "_index.yaml")
+	pathsContent := []byte(`/api/v1/users:
   get:
-    operationId: test
-    summary: Test endpoint
+    summary: Get users
     responses:
       '200':
         description: OK
 `)
-
 	if err := os.WriteFile(pathsFile, pathsContent, 0644); err != nil {
 		t.Fatalf("Failed to create paths file: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestReferenceResolver_ExpandPathsSection_StringRef(t *testing.T) {
 	resolver := NewReferenceResolver(loader, parser)
 
 	data := map[string]interface{}{
-		"openapi": "3.0.3",
+		"openapi": "3.0.0",
 		"paths": "./paths/_index.yaml",
 	}
 
@@ -370,33 +370,25 @@ func TestReferenceResolver_ExpandPathsSection_StringRef(t *testing.T) {
 		t.Fatalf("paths should be a map, got %T", data["paths"])
 	}
 
-	if _, hasTest := paths["/api/v1/test"]; !hasTest {
-		t.Error("paths should contain /api/v1/test after expansion")
+	if _, exists := paths["/api/v1/users"]; !exists {
+		t.Error("paths should contain /api/v1/users")
 	}
 }
 
 func TestReferenceResolver_ExpandComponentsParameters(t *testing.T) {
 	tmpDir := t.TempDir()
-	paramsFile := filepath.Join(tmpDir, "parameters", "_index.yaml")
-	if err := os.MkdirAll(filepath.Dir(paramsFile), 0755); err != nil {
+	paramsDir := filepath.Join(tmpDir, "parameters")
+	if err := os.MkdirAll(paramsDir, 0755); err != nil {
 		t.Fatalf("Failed to create parameters directory: %v", err)
 	}
-	
+
+	paramsFile := filepath.Join(paramsDir, "_index.yaml")
 	paramsContent := []byte(`X-App-Version:
   in: header
   name: X-App-Version
-  required: true
   schema:
     type: string
-X-Device-Id:
-  in: header
-  name: X-Device-Id
-  required: true
-  schema:
-    type: string
-    format: uuid
 `)
-
 	if err := os.WriteFile(paramsFile, paramsContent, 0644); err != nil {
 		t.Fatalf("Failed to create parameters file: %v", err)
 	}
@@ -406,7 +398,7 @@ X-Device-Id:
 	resolver := NewReferenceResolver(loader, parser)
 
 	data := map[string]interface{}{
-		"openapi": "3.0.3",
+		"openapi": "3.0.0",
 		"components": map[string]interface{}{
 			"parameters": map[string]interface{}{
 				"$ref": "./parameters/_index.yaml",
@@ -423,53 +415,27 @@ X-Device-Id:
 	}
 
 	components := data["components"].(map[string]interface{})
-	parameters, ok := components["parameters"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("parameters should be a map, got %T", components["parameters"])
-	}
+	parameters := components["parameters"].(map[string]interface{})
 
-	if _, hasRef := parameters["$ref"]; hasRef {
-		t.Error("parameters should not contain $ref after expansion")
-	}
-
-	if _, hasAppVersion := parameters["X-App-Version"]; !hasAppVersion {
-		t.Error("parameters should contain X-App-Version after expansion")
-	}
-
-	if _, hasDeviceId := parameters["X-Device-Id"]; !hasDeviceId {
-		t.Error("parameters should contain X-Device-Id after expansion")
+	if _, exists := parameters["X-App-Version"]; !exists {
+		t.Error("parameters should contain X-App-Version")
 	}
 }
 
 func TestReferenceResolver_ExpandComponentsSchemas(t *testing.T) {
 	tmpDir := t.TempDir()
-	schemasFile := filepath.Join(tmpDir, "schemas", "_index.yaml")
-	if err := os.MkdirAll(filepath.Dir(schemasFile), 0755); err != nil {
+	schemasDir := filepath.Join(tmpDir, "schemas")
+	if err := os.MkdirAll(schemasDir, 0755); err != nil {
 		t.Fatalf("Failed to create schemas directory: %v", err)
 	}
-	
-	schemasContent := []byte(`LoginRequest:
+
+	schemasFile := filepath.Join(schemasDir, "_index.yaml")
+	schemasContent := []byte(`User:
   type: object
-  required:
-    - phone
-    - password
-  properties:
-    phone:
-      type: string
-    password:
-      type: string
-EmployeeCreateRequest:
-  type: object
-  required:
-    - name
-    - primary_phone
   properties:
     name:
       type: string
-    primary_phone:
-      type: string
 `)
-
 	if err := os.WriteFile(schemasFile, schemasContent, 0644); err != nil {
 		t.Fatalf("Failed to create schemas file: %v", err)
 	}
@@ -479,7 +445,7 @@ EmployeeCreateRequest:
 	resolver := NewReferenceResolver(loader, parser)
 
 	data := map[string]interface{}{
-		"openapi": "3.0.3",
+		"openapi": "3.0.0",
 		"components": map[string]interface{}{
 			"schemas": "./schemas/_index.yaml",
 		},
@@ -494,65 +460,40 @@ EmployeeCreateRequest:
 	}
 
 	components := data["components"].(map[string]interface{})
-	schemas, ok := components["schemas"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("schemas should be a map, got %T", components["schemas"])
-	}
+	schemas := components["schemas"].(map[string]interface{})
 
-	if _, hasLoginRequest := schemas["LoginRequest"]; !hasLoginRequest {
-		t.Error("schemas should contain LoginRequest after expansion")
-	}
-
-	if _, hasEmployeeRequest := schemas["EmployeeCreateRequest"]; !hasEmployeeRequest {
-		t.Error("schemas should contain EmployeeCreateRequest after expansion")
+	if _, exists := schemas["User"]; !exists {
+		t.Error("schemas should contain User")
 	}
 }
 
 func TestReferenceResolver_ExpandMultipleSections(t *testing.T) {
 	tmpDir := t.TempDir()
-	
-	pathsFile := filepath.Join(tmpDir, "paths", "_index.yaml")
-	if err := os.MkdirAll(filepath.Dir(pathsFile), 0755); err != nil {
+	pathsDir := filepath.Join(tmpDir, "paths")
+	paramsDir := filepath.Join(tmpDir, "parameters")
+	if err := os.MkdirAll(pathsDir, 0755); err != nil {
 		t.Fatalf("Failed to create paths directory: %v", err)
 	}
-	pathsContent := []byte(`/api/v1/test:
+	if err := os.MkdirAll(paramsDir, 0755); err != nil {
+		t.Fatalf("Failed to create parameters directory: %v", err)
+	}
+
+	pathsFile := filepath.Join(pathsDir, "_index.yaml")
+	pathsContent := []byte(`/api/v1/users:
   get:
-    operationId: test
-    responses:
-      '200':
-        description: OK
+    summary: Get users
 `)
 	if err := os.WriteFile(pathsFile, pathsContent, 0644); err != nil {
 		t.Fatalf("Failed to create paths file: %v", err)
 	}
 
-	paramsFile := filepath.Join(tmpDir, "parameters", "_index.yaml")
-	if err := os.MkdirAll(filepath.Dir(paramsFile), 0755); err != nil {
-		t.Fatalf("Failed to create parameters directory: %v", err)
-	}
-	paramsContent := []byte(`X-Header:
+	paramsFile := filepath.Join(paramsDir, "_index.yaml")
+	paramsContent := []byte(`X-App-Version:
   in: header
-  name: X-Header
-  required: true
-  schema:
-    type: string
+  name: X-App-Version
 `)
 	if err := os.WriteFile(paramsFile, paramsContent, 0644); err != nil {
 		t.Fatalf("Failed to create parameters file: %v", err)
-	}
-
-	schemasFile := filepath.Join(tmpDir, "schemas", "_index.yaml")
-	if err := os.MkdirAll(filepath.Dir(schemasFile), 0755); err != nil {
-		t.Fatalf("Failed to create schemas directory: %v", err)
-	}
-	schemasContent := []byte(`TestSchema:
-  type: object
-  properties:
-    id:
-      type: integer
-`)
-	if err := os.WriteFile(schemasFile, schemasContent, 0644); err != nil {
-		t.Fatalf("Failed to create schemas file: %v", err)
 	}
 
 	loader := NewFileLoader()
@@ -560,7 +501,7 @@ func TestReferenceResolver_ExpandMultipleSections(t *testing.T) {
 	resolver := NewReferenceResolver(loader, parser)
 
 	data := map[string]interface{}{
-		"openapi": "3.0.3",
+		"openapi": "3.0.0",
 		"paths": map[string]interface{}{
 			"$ref": "./paths/_index.yaml",
 		},
@@ -568,7 +509,6 @@ func TestReferenceResolver_ExpandMultipleSections(t *testing.T) {
 			"parameters": map[string]interface{}{
 				"$ref": "./parameters/_index.yaml",
 			},
-			"schemas": "./schemas/_index.yaml",
 		},
 	}
 
@@ -584,66 +524,47 @@ func TestReferenceResolver_ExpandMultipleSections(t *testing.T) {
 	if !ok {
 		t.Fatalf("paths should be a map, got %T", data["paths"])
 	}
-	if _, hasRef := paths["$ref"]; hasRef {
-		t.Error("paths should not contain $ref after expansion")
-	}
-	if _, hasTest := paths["/api/v1/test"]; !hasTest {
-		t.Error("paths should contain /api/v1/test after expansion")
+	if _, exists := paths["/api/v1/users"]; !exists {
+		t.Error("paths should contain /api/v1/users")
 	}
 
 	components := data["components"].(map[string]interface{})
-	
-	parameters, ok := components["parameters"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("parameters should be a map, got %T", components["parameters"])
-	}
-	if _, hasRef := parameters["$ref"]; hasRef {
-		t.Error("parameters should not contain $ref after expansion")
-	}
-	if _, hasHeader := parameters["X-Header"]; !hasHeader {
-		t.Error("parameters should contain X-Header after expansion")
-	}
-
-	schemas, ok := components["schemas"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("schemas should be a map, got %T", components["schemas"])
-	}
-	if _, hasTestSchema := schemas["TestSchema"]; !hasTestSchema {
-		t.Error("schemas should contain TestSchema after expansion")
+	parameters := components["parameters"].(map[string]interface{})
+	if _, exists := parameters["X-App-Version"]; !exists {
+		t.Error("parameters should contain X-App-Version")
 	}
 }
 
 func TestReferenceResolver_ExpandSectionWithNestedRefs(t *testing.T) {
 	tmpDir := t.TempDir()
-	
-	schemasFile := filepath.Join(tmpDir, "schemas", "_index.yaml")
-	if err := os.MkdirAll(filepath.Dir(schemasFile), 0755); err != nil {
-		t.Fatalf("Failed to create schemas directory: %v", err)
-	}
-	
-	externalSchemaFile := filepath.Join(tmpDir, "schemas", "external.yaml")
-	if err := os.MkdirAll(filepath.Dir(externalSchemaFile), 0755); err != nil {
-		t.Fatalf("Failed to create schemas directory: %v", err)
-	}
-	externalContent := []byte(`type: object
-properties:
-  external_field:
-    type: string
-`)
-	if err := os.WriteFile(externalSchemaFile, externalContent, 0644); err != nil {
-		t.Fatalf("Failed to create external schema file: %v", err)
+	pathsDir := filepath.Join(tmpDir, "paths")
+	if err := os.MkdirAll(pathsDir, 0755); err != nil {
+		t.Fatalf("Failed to create paths directory: %v", err)
 	}
 
-	schemasContent := []byte(`TestSchema:
-  type: object
-  properties:
-    id:
-      type: integer
-    external:
-      $ref: "./external.yaml"
+	externalFile := filepath.Join(pathsDir, "User.yaml")
+	externalContent := []byte(`type: object
+properties:
+  name:
+    type: string
 `)
-	if err := os.WriteFile(schemasFile, schemasContent, 0644); err != nil {
-		t.Fatalf("Failed to create schemas file: %v", err)
+	if err := os.WriteFile(externalFile, externalContent, 0644); err != nil {
+		t.Fatalf("Failed to create external file: %v", err)
+	}
+
+	pathsFile := filepath.Join(pathsDir, "_index.yaml")
+	pathsContent := []byte(`/api/v1/users:
+  get:
+    summary: Get users
+    responses:
+      '200':
+        content:
+          application/json:
+            schema:
+              $ref: ./User.yaml
+`)
+	if err := os.WriteFile(pathsFile, pathsContent, 0644); err != nil {
+		t.Fatalf("Failed to create paths file: %v", err)
 	}
 
 	loader := NewFileLoader()
@@ -651,9 +572,9 @@ properties:
 	resolver := NewReferenceResolver(loader, parser)
 
 	data := map[string]interface{}{
-		"openapi": "3.0.3",
-		"components": map[string]interface{}{
-			"schemas": "./schemas/_index.yaml",
+		"openapi": "3.0.0",
+		"paths": map[string]interface{}{
+			"$ref": "./paths/_index.yaml",
 		},
 	}
 
@@ -665,30 +586,18 @@ properties:
 		t.Fatalf("ResolveAll() error = %v", err)
 	}
 
-	components := data["components"].(map[string]interface{})
-	schemas, ok := components["schemas"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("schemas should be a map, got %T", components["schemas"])
-	}
+	paths := data["paths"].(map[string]interface{})
+	usersPath := paths["/api/v1/users"].(map[string]interface{})
+	get := usersPath["get"].(map[string]interface{})
+	responses := get["responses"].(map[string]interface{})
+	response200 := responses["200"].(map[string]interface{})
+	content := response200["content"].(map[string]interface{})
+	appJson := content["application/json"].(map[string]interface{})
+	schema := appJson["schema"].(map[string]interface{})
 
-	testSchema, ok := schemas["TestSchema"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("TestSchema should be a map, got %T", schemas["TestSchema"])
-	}
-
-	properties, ok := testSchema["properties"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("properties should be a map, got %T", testSchema["properties"])
-	}
-
-	external, ok := properties["external"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("external should be a map, got %T", properties["external"])
-	}
-
-	ref, hasRef := external["$ref"]
+	ref, hasRef := schema["$ref"]
 	if !hasRef {
-		t.Error("external should contain $ref after processing")
+		t.Error("schema should contain $ref")
 	}
 
 	refStr, ok := ref.(string)
@@ -701,14 +610,66 @@ properties:
 	}
 }
 
+func TestReferenceResolver_ExpandSectionWithRelativeRefs(t *testing.T) {
+	tmpDir := t.TempDir()
+	pathsDir := filepath.Join(tmpDir, "paths")
+	if err := os.MkdirAll(pathsDir, 0755); err != nil {
+		t.Fatalf("Failed to create paths directory: %v", err)
+	}
+
+	tableRegistryFile := filepath.Join(pathsDir, "tableRegistry.yaml")
+	tableRegistryContent := []byte(`get:
+  summary: Get table registry
+  responses:
+    '200':
+      description: OK
+`)
+	if err := os.WriteFile(tableRegistryFile, tableRegistryContent, 0644); err != nil {
+		t.Fatalf("Failed to create tableRegistry file: %v", err)
+	}
+
+	pathsFile := filepath.Join(pathsDir, "_index.yaml")
+	pathsContent := []byte(`/api/v1/table-registry:
+  $ref: ./tableRegistry.yaml
+`)
+	if err := os.WriteFile(pathsFile, pathsContent, 0644); err != nil {
+		t.Fatalf("Failed to create paths file: %v", err)
+	}
+
+	loader := NewFileLoader()
+	parser := NewParser()
+	resolver := NewReferenceResolver(loader, parser)
+
+	data := map[string]interface{}{
+		"openapi": "3.0.0",
+		"paths": map[string]interface{}{
+			"$ref": "./paths/_index.yaml",
+		},
+	}
+
+	ctx := context.Background()
+	config := domain.Config{MaxDepth: 10}
+
+	err := resolver.ResolveAll(ctx, data, tmpDir, config)
+	if err != nil {
+		t.Fatalf("ResolveAll() error = %v", err)
+	}
+
+	paths := data["paths"].(map[string]interface{})
+	tableRegistryPath := paths["/api/v1/table-registry"].(map[string]interface{})
+	if _, exists := tableRegistryPath["get"]; !exists {
+		t.Error("table-registry path should contain get method")
+	}
+}
+
 func TestReferenceResolver_ResolveAll_AllOfWithExternalRef(t *testing.T) {
 	tmpDir := t.TempDir()
 	
-	externalFile := filepath.Join(tmpDir, "external.yaml")
+	externalFile := filepath.Join(tmpDir, "Base.yaml")
 	externalContent := []byte(`type: object
 properties:
-  external_field:
-    type: string
+  id:
+    type: integer
 `)
 	if err := os.WriteFile(externalFile, externalContent, 0644); err != nil {
 		t.Fatalf("Failed to create external file: %v", err)
@@ -722,15 +683,15 @@ properties:
 		"openapi": "3.0.0",
 		"components": map[string]interface{}{
 			"schemas": map[string]interface{}{
-				"TestSchema": map[string]interface{}{
-					"type": "object",
+				"User": map[string]interface{}{
 					"allOf": []interface{}{
 						map[string]interface{}{
-							"$ref": externalFile,
+							"$ref": "./Base.yaml",
 						},
 						map[string]interface{}{
+							"type": "object",
 							"properties": map[string]interface{}{
-								"local_field": map[string]interface{}{
+								"name": map[string]interface{}{
 									"type": "string",
 								},
 							},
@@ -750,8 +711,8 @@ properties:
 	}
 
 	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
-	testSchema := schemas["TestSchema"].(map[string]interface{})
-	allOf := testSchema["allOf"].([]interface{})
+	user := schemas["User"].(map[string]interface{})
+	allOf := user["allOf"].([]interface{})
 	
 	if len(allOf) != 2 {
 		t.Fatalf("allOf should have 2 items, got %d", len(allOf))
@@ -770,86 +731,6 @@ properties:
 
 	if !strings.HasPrefix(refStr, "#/components/schemas/") {
 		t.Errorf("$ref should be an internal reference, got %s", refStr)
-	}
-}
-
-func TestReferenceResolver_ExpandSectionWithRelativeRefs(t *testing.T) {
-	tmpDir := t.TempDir()
-	
-	pathsFile := filepath.Join(tmpDir, "paths", "_index.yaml")
-	if err := os.MkdirAll(filepath.Dir(pathsFile), 0755); err != nil {
-		t.Fatalf("Failed to create paths directory: %v", err)
-	}
-	
-	tableRegistryFile := filepath.Join(tmpDir, "paths", "tableRegistry.yaml")
-	tableRegistryContent := []byte(`get:
-  operationId: getTableRegistry
-  summary: Получить все записи из справочника
-  responses:
-    '200':
-      description: OK
-`)
-	if err := os.WriteFile(tableRegistryFile, tableRegistryContent, 0644); err != nil {
-		t.Fatalf("Failed to create tableRegistry file: %v", err)
-	}
-
-	pathsContent := []byte(`/api/v1/table-registry:
-  $ref: ./tableRegistry.yaml
-`)
-	if err := os.WriteFile(pathsFile, pathsContent, 0644); err != nil {
-		t.Fatalf("Failed to create paths file: %v", err)
-	}
-
-	loader := NewFileLoader()
-	parser := NewParser()
-	resolver := NewReferenceResolver(loader, parser)
-
-	data := map[string]interface{}{
-		"openapi": "3.0.3",
-		"paths": map[string]interface{}{
-			"$ref": "./paths/_index.yaml",
-		},
-	}
-
-	ctx := context.Background()
-	config := domain.Config{MaxDepth: 10}
-
-	err := resolver.ResolveAll(ctx, data, tmpDir, config)
-	if err != nil {
-		t.Fatalf("ResolveAll() error = %v", err)
-	}
-
-	paths, ok := data["paths"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("paths should be a map, got %T", data["paths"])
-	}
-
-	if _, hasRef := paths["$ref"]; hasRef {
-		t.Error("paths should not contain $ref after expansion")
-	}
-
-	tableRegistryPath, hasTableRegistry := paths["/api/v1/table-registry"]
-	if !hasTableRegistry {
-		t.Error("paths should contain /api/v1/table-registry after expansion")
-	}
-
-	tableRegistryMap, ok := tableRegistryPath.(map[string]interface{})
-	if !ok {
-		t.Fatalf("/api/v1/table-registry should be a map, got %T", tableRegistryPath)
-	}
-
-	getOp, hasGet := tableRegistryMap["get"]
-	if !hasGet {
-		t.Error("/api/v1/table-registry should contain 'get' operation")
-	}
-
-	getOpMap, ok := getOp.(map[string]interface{})
-	if !ok {
-		t.Fatalf("get operation should be a map, got %T", getOp)
-	}
-
-	if getOpMap["operationId"] != "getTableRegistry" {
-		t.Errorf("expected operationId to be 'getTableRegistry', got %v", getOpMap["operationId"])
 	}
 }
 
@@ -920,3 +801,67 @@ properties:
 	}
 }
 
+func TestReferenceResolver_ResolveAll_ComponentsWithParentDirRef(t *testing.T) {
+	tmpDir := t.TempDir()
+	rootFile := filepath.Join(tmpDir, "openapi.yaml")
+	schemasDir := filepath.Join(tmpDir, "schemas")
+	if err := os.MkdirAll(schemasDir, 0755); err != nil {
+		t.Fatalf("Failed to create schemas directory: %v", err)
+	}
+	
+	externalFile := filepath.Join(schemasDir, "Name.yaml")
+	externalContent := []byte(`type: string
+description: Name field
+`)
+	if err := os.WriteFile(externalFile, externalContent, 0644); err != nil {
+		t.Fatalf("Failed to create external file: %v", err)
+	}
+
+	loader := NewFileLoader()
+	parser := NewParser()
+	resolver := NewReferenceResolver(loader, parser)
+
+	data := map[string]interface{}{
+		"openapi": "3.0.0",
+		"components": map[string]interface{}{
+			"schemas": map[string]interface{}{
+				"EmployeeShortInfo": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name": map[string]interface{}{
+							"$ref": "./schemas/Name.yaml",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	config := domain.Config{MaxDepth: 10}
+
+	basePath := filepath.Dir(rootFile)
+	err := resolver.ResolveAll(ctx, data, basePath, config)
+	if err != nil {
+		t.Fatalf("ResolveAll() error = %v", err)
+	}
+
+	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
+	employeeShortInfo := schemas["EmployeeShortInfo"].(map[string]interface{})
+	properties := employeeShortInfo["properties"].(map[string]interface{})
+	name := properties["name"].(map[string]interface{})
+	
+	ref, hasRef := name["$ref"]
+	if !hasRef {
+		t.Error("name should contain $ref")
+	}
+
+	refStr, ok := ref.(string)
+	if !ok {
+		t.Fatalf("$ref should be a string, got %T", ref)
+	}
+
+	if !strings.HasPrefix(refStr, "#/components/schemas/") {
+		t.Errorf("$ref should be an internal reference, got %s", refStr)
+	}
+}

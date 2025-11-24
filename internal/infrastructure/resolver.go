@@ -20,6 +20,7 @@ type ReferenceResolver struct {
 	componentsBaseDir map[string]string
 	fileCache map[string]interface{}
 	componentHashes map[string]string
+	rootBasePath string
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
@@ -45,6 +46,7 @@ func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) do
 func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]interface{}, basePath string, config domain.Config) error {
 	r.visited = make(map[string]bool)
 	r.rootDoc = data
+	r.rootBasePath = basePath
 	r.pathsBaseDir = ""
 	r.componentsBaseDir = make(map[string]string)
 	r.fileCache = make(map[string]interface{})
