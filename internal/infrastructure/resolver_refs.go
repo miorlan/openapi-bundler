@@ -207,8 +207,31 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				}
 			}
 
-			// Параметры уже обработаны выше, пропускаем
+			// Параметры обрабатываем рекурсивно, если они еще не обработаны
 			if k == "parameters" {
+				if paramsArray, ok := v.([]interface{}); ok {
+					for i, param := range paramsArray {
+						if paramMap, ok := param.(map[string]interface{}); ok {
+							if refVal, hasRef := paramMap["$ref"]; hasRef {
+								if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
+									// Это внешняя ссылка на параметр
+									// Создаём компонент в components.parameters, но оставляем $ref в массиве
+									internalRef, err := r.resolveAndReplaceExternalRefWithType(ctx, refStr, baseDir, config, depth, "parameters", false)
+									if err == nil && internalRef != "" {
+										// Заменяем элемент массива на только $ref
+										paramsArray[i] = map[string]interface{}{
+											"$ref": internalRef,
+										}
+										continue
+									}
+								} else if refStr, ok := refVal.(string); ok && strings.HasPrefix(refStr, "#/components/parameters/") {
+									// Это уже внутренняя ссылка на параметр - не обрабатываем дальше
+									continue
+								}
+							}
+						}
+					}
+				}
 				continue
 			}
 
@@ -915,12 +938,14 @@ func (r *ReferenceResolver) inlineSingleUseComponents(ctx context.Context, data 
 
 	// Заменяем $ref на inline содержимое для компонентов, используемых только один раз
 	// Исключаем компоненты, используемые внутри других схем (в properties, items и т.д.)
-	return r.replaceRefsWithInline(ctx, data, singleUseComponents, components, false)
+	// Исключаем компоненты, используемые в responses.content.application/json.schema
+	return r.replaceRefsWithInline(ctx, data, singleUseComponents, components, false, false)
 }
 
 // replaceRefsWithInline заменяет $ref на inline содержимое в документе
 // skipNested: если true, пропускает $ref внутри properties, items и т.д.
-func (r *ReferenceResolver) replaceRefsWithInline(ctx context.Context, node interface{}, singleUseComponents map[string]string, components map[string]interface{}, skipNested bool) error {
+// inContentSchema: если true, мы в schema внутри content (responses, requestBody) - не инлайним
+func (r *ReferenceResolver) replaceRefsWithInline(ctx context.Context, node interface{}, singleUseComponents map[string]string, components map[string]interface{}, skipNested bool, inContentSchema bool) error {
 	switch n := node.(type) {
 	case map[string]interface{}:
 		// Проверяем, не находимся ли мы внутри properties, items и т.д.
@@ -931,6 +956,10 @@ func (r *ReferenceResolver) replaceRefsWithInline(ctx context.Context, node inte
 				if componentHash, isSingleUse := singleUseComponents[refStr]; isSingleUse {
 					// Не инлайним компоненты, используемые внутри других схем
 					if isNested {
+						return nil
+					}
+					// Не инлайним компоненты, используемые в responses.content.application/json.schema
+					if inContentSchema {
 						return nil
 					}
 					// Находим компонент по хешу
@@ -959,14 +988,28 @@ func (r *ReferenceResolver) replaceRefsWithInline(ctx context.Context, node inte
 			}
 		}
 		// Рекурсивно обрабатываем все поля
-		for _, v := range n {
-			if err := r.replaceRefsWithInline(ctx, v, singleUseComponents, components, isNested); err != nil {
+		for k, v := range n {
+			// Если мы в content, проверяем, не находимся ли мы в responses
+			if k == "content" {
+				if err := r.replaceRefsWithInline(ctx, v, singleUseComponents, components, false, false); err != nil {
+					return err
+				}
+				continue
+			}
+			// Если мы в schema внутри content, устанавливаем флаг
+			if k == "schema" {
+				if err := r.replaceRefsWithInline(ctx, v, singleUseComponents, components, isNested, true); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := r.replaceRefsWithInline(ctx, v, singleUseComponents, components, isNested, inContentSchema); err != nil {
 				return err
 			}
 		}
 	case []interface{}:
 		for _, item := range n {
-			if err := r.replaceRefsWithInline(ctx, item, singleUseComponents, components, skipNested); err != nil {
+			if err := r.replaceRefsWithInline(ctx, item, singleUseComponents, components, skipNested, inContentSchema); err != nil {
 				return err
 			}
 		}
