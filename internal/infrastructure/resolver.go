@@ -196,10 +196,7 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 		return err
 	}
 
-	// Инлайним компоненты, которые используются только один раз
-	if err := r.inlineSingleUseComponents(ctx, data); err != nil {
-		return err
-	}
+	// Не инлайним компоненты - все схемы и параметры остаются как $ref в components
 
 	r.cleanNilValues(data)
 

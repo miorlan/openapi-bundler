@@ -183,23 +183,21 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 		}
 
 		for k, v := range n {
-			// Специальная обработка для content (responses, requestBody)
-			// Inline схемы в content должны оставаться inline, а не извлекаться в components
+			// Обрабатываем content как обычно - все схемы создают компоненты
 			if k == "content" {
 				if contentMap, ok := v.(map[string]interface{}); ok {
-					// Обрабатываем content с флагом, что мы в контексте content
-					if err := r.replaceExternalRefsWithContext(ctx, contentMap, baseDir, config, depth, true, false); err != nil {
+					// Обрабатываем content - все схемы создают компоненты
+					if err := r.replaceExternalRefsWithContext(ctx, contentMap, baseDir, config, depth, false, false); err != nil {
 						return fmt.Errorf("failed to process content: %w", err)
 					}
 					continue
 				}
 			}
 
-			// Специальная обработка для schema в content (responses, requestBody)
-			// Внешние $ref в schema должны создавать компоненты и оставаться как $ref
+			// Обрабатываем schema в content как обычно - все схемы создают компоненты
 			if k == "schema" && inContentContext {
 				if schemaMap, ok := v.(map[string]interface{}); ok {
-					// Обрабатываем schema в content - внешние $ref создают компоненты
+					// Обрабатываем schema в content - все схемы создают компоненты
 					if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, false, false); err != nil {
 						return fmt.Errorf("failed to process schema: %w", err)
 					}
@@ -943,77 +941,9 @@ func (r *ReferenceResolver) inlineSingleUseComponents(ctx context.Context, data 
 }
 
 // replaceRefsWithInline заменяет $ref на inline содержимое в документе
-// skipNested: если true, пропускает $ref внутри properties, items и т.д.
-// inContentSchema: если true, мы в schema внутри content (responses, requestBody) - не инлайним
+// Отключено - все схемы и параметры остаются как $ref в components
 func (r *ReferenceResolver) replaceRefsWithInline(ctx context.Context, node interface{}, singleUseComponents map[string]string, components map[string]interface{}, skipNested bool, inContentSchema bool) error {
-	switch n := node.(type) {
-	case map[string]interface{}:
-		// Проверяем, не находимся ли мы внутри properties, items и т.д.
-		isNested := skipNested || n["properties"] != nil || n["items"] != nil || n["additionalProperties"] != nil
-		
-		if refVal, ok := n["$ref"]; ok {
-			if refStr, ok := refVal.(string); ok {
-				if componentHash, isSingleUse := singleUseComponents[refStr]; isSingleUse {
-					// Не инлайним компоненты, используемые внутри других схем
-					if isNested {
-						return nil
-					}
-					// Не инлайним компоненты, используемые в responses.content.application/json.schema
-					if inContentSchema {
-						return nil
-					}
-					// Находим компонент по хешу
-					for _, ct := range componentTypes {
-						section, ok := components[ct].(map[string]interface{})
-						if !ok {
-							continue
-						}
-						for name, component := range section {
-							if r.hashComponent(component) == componentHash {
-								// Заменяем $ref на полное содержимое
-								componentCopy := r.deepCopy(component)
-								if componentCopy != nil {
-									for k, v := range componentCopy.(map[string]interface{}) {
-										n[k] = v
-									}
-									delete(n, "$ref")
-									// Удаляем компонент из components
-									delete(section, name)
-								}
-								return nil
-							}
-						}
-					}
-				}
-			}
-		}
-		// Рекурсивно обрабатываем все поля
-		for k, v := range n {
-			// Если мы в content, проверяем, не находимся ли мы в responses
-			if k == "content" {
-				if err := r.replaceRefsWithInline(ctx, v, singleUseComponents, components, false, false); err != nil {
-					return err
-				}
-				continue
-			}
-			// Если мы в schema внутри content, устанавливаем флаг
-			if k == "schema" {
-				if err := r.replaceRefsWithInline(ctx, v, singleUseComponents, components, isNested, true); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := r.replaceRefsWithInline(ctx, v, singleUseComponents, components, isNested, inContentSchema); err != nil {
-				return err
-			}
-		}
-	case []interface{}:
-		for _, item := range n {
-			if err := r.replaceRefsWithInline(ctx, item, singleUseComponents, components, skipNested, inContentSchema); err != nil {
-				return err
-			}
-		}
-	}
+	// Не инлайним компоненты - все схемы и параметры остаются как $ref
 	return nil
 }
 
