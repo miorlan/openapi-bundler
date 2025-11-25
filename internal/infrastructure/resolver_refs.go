@@ -11,6 +11,10 @@ import (
 )
 
 func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interface{}, baseDir string, config domain.Config, depth int) error {
+	return r.replaceExternalRefsWithContext(ctx, node, baseDir, config, depth, false)
+}
+
+func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, node interface{}, baseDir string, config domain.Config, depth int, inContentContext bool) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -25,7 +29,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 			if allOf, ok := n["allOf"].([]interface{}); ok {
 				for i, item := range allOf {
 					if itemMap, ok := item.(map[string]interface{}); ok {
-						if err := r.replaceExternalRefs(ctx, itemMap, baseDir, config, depth); err != nil {
+						if err := r.replaceExternalRefsWithContext(ctx, itemMap, baseDir, config, depth, inContentContext); err != nil {
 							return fmt.Errorf("failed to process allOf item %d: %w", i, err)
 						}
 					}
@@ -36,7 +40,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 			if oneOf, ok := n["oneOf"].([]interface{}); ok {
 				for i, item := range oneOf {
 					if itemMap, ok := item.(map[string]interface{}); ok {
-						if err := r.replaceExternalRefs(ctx, itemMap, baseDir, config, depth); err != nil {
+						if err := r.replaceExternalRefsWithContext(ctx, itemMap, baseDir, config, depth, inContentContext); err != nil {
 							return fmt.Errorf("failed to process oneOf item %d: %w", i, err)
 						}
 					}
@@ -47,7 +51,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 			if anyOf, ok := n["anyOf"].([]interface{}); ok {
 				for i, item := range anyOf {
 					if itemMap, ok := item.(map[string]interface{}); ok {
-						if err := r.replaceExternalRefs(ctx, itemMap, baseDir, config, depth); err != nil {
+						if err := r.replaceExternalRefsWithContext(ctx, itemMap, baseDir, config, depth, inContentContext); err != nil {
 							return fmt.Errorf("failed to process anyOf item %d: %w", i, err)
 						}
 					}
@@ -59,7 +63,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 			if properties, ok := n["properties"].(map[string]interface{}); ok {
 				for propName, propValue := range properties {
 					if propMap, ok := propValue.(map[string]interface{}); ok {
-						if err := r.replaceExternalRefs(ctx, propMap, baseDir, config, depth); err != nil {
+						if err := r.replaceExternalRefsWithContext(ctx, propMap, baseDir, config, depth, inContentContext); err != nil {
 							return fmt.Errorf("failed to process property %s: %w", propName, err)
 						}
 					}
@@ -69,7 +73,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 
 		if _, hasItems := n["items"]; hasItems {
 			if items, ok := n["items"].(map[string]interface{}); ok {
-				if err := r.replaceExternalRefs(ctx, items, baseDir, config, depth); err != nil {
+				if err := r.replaceExternalRefsWithContext(ctx, items, baseDir, config, depth, inContentContext); err != nil {
 					return fmt.Errorf("failed to process items: %w", err)
 				}
 			}
@@ -77,7 +81,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 
 		if _, hasAdditionalProperties := n["additionalProperties"]; hasAdditionalProperties {
 			if additionalProps, ok := n["additionalProperties"].(map[string]interface{}); ok {
-				if err := r.replaceExternalRefs(ctx, additionalProps, baseDir, config, depth); err != nil {
+				if err := r.replaceExternalRefsWithContext(ctx, additionalProps, baseDir, config, depth, inContentContext); err != nil {
 					return fmt.Errorf("failed to process additionalProperties: %w", err)
 				}
 			}
@@ -87,7 +91,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 			if patternProps, ok := n["patternProperties"].(map[string]interface{}); ok {
 				for pattern, patternValue := range patternProps {
 					if patternMap, ok := patternValue.(map[string]interface{}); ok {
-						if err := r.replaceExternalRefs(ctx, patternMap, baseDir, config, depth); err != nil {
+						if err := r.replaceExternalRefsWithContext(ctx, patternMap, baseDir, config, depth, inContentContext); err != nil {
 							return fmt.Errorf("failed to process patternProperty %s: %w", pattern, err)
 						}
 					}
@@ -151,14 +155,26 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 		}
 
 		for k, v := range n {
+			// Специальная обработка для content (responses, requestBody)
+			// Inline схемы в content должны оставаться inline, а не извлекаться в components
+			if k == "content" {
+				if contentMap, ok := v.(map[string]interface{}); ok {
+					// Обрабатываем content с флагом, что мы в контексте content
+					if err := r.replaceExternalRefsWithContext(ctx, contentMap, baseDir, config, depth, true); err != nil {
+						return fmt.Errorf("failed to process content: %w", err)
+					}
+					continue
+				}
+			}
+
 			// Специальная обработка для schema в content (responses, requestBody)
 			// Inline схемы должны оставаться inline, а не извлекаться в components
-			if k == "schema" {
+			if k == "schema" && inContentContext {
 				if schemaMap, ok := v.(map[string]interface{}); ok {
 					// Если это inline схема (без $ref), обрабатываем только вложенные ссылки
 					if _, hasRef := schemaMap["$ref"]; !hasRef {
-						// Это inline схема - обрабатываем только вложенные ссылки, но не извлекаем в components
-						if err := r.replaceExternalRefs(ctx, schemaMap, baseDir, config, depth); err != nil {
+						// Это inline схема в content - обрабатываем только вложенные ссылки, но не извлекаем в components
+						if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, true); err != nil {
 							return fmt.Errorf("failed to process inline schema: %w", err)
 						}
 						continue
@@ -246,7 +262,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 						// НО только если параметр не был заменен на $ref
 						if paramMap, ok := paramsArray[i].(map[string]interface{}); ok {
 							if _, hasRef := paramMap["$ref"]; !hasRef {
-								if err := r.replaceExternalRefs(ctx, paramsArray[i], baseDir, config, depth); err != nil {
+								if err := r.replaceExternalRefsWithContext(ctx, paramsArray[i], baseDir, config, depth, false); err != nil {
 									return fmt.Errorf("failed to process parameter %d: %w", i, err)
 								}
 								// После обработки проверяем, не совпадает ли параметр с компонентом
@@ -321,7 +337,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 									}
 								}
 							}
-							if err := r.replaceExternalRefs(ctx, pathMap, pathsBaseDir, config, depth); err != nil {
+							if err := r.replaceExternalRefsWithContext(ctx, pathMap, pathsBaseDir, config, depth, false); err != nil {
 								return fmt.Errorf("failed to process path %s: %w", pathKey, err)
 							}
 						}
@@ -358,7 +374,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 								}
 								if componentMap, ok := component.(map[string]interface{}); ok {
 									// Обрабатываем компонент (внутренние $ref будут "подняты" позже в liftComponentRefs)
-									if err := r.replaceExternalRefs(ctx, componentMap, componentBaseDir, config, depth); err != nil {
+									if err := r.replaceExternalRefsWithContext(ctx, componentMap, componentBaseDir, config, depth, false); err != nil {
 										return fmt.Errorf("failed to process component %s/%s: %w", ct, name, err)
 									}
 								}
@@ -369,7 +385,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 				}
 			}
 
-			if err := r.replaceExternalRefs(ctx, v, baseDir, config, depth); err != nil {
+			if err := r.replaceExternalRefsWithContext(ctx, v, baseDir, config, depth, inContentContext); err != nil {
 				return fmt.Errorf("failed to process field %s: %w", k, err)
 			}
 		}
@@ -405,7 +421,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 				}
 			}
 			// Для остальных элементов массива обрабатываем рекурсивно
-			if err := r.replaceExternalRefs(ctx, item, baseDir, config, depth); err != nil {
+			if err := r.replaceExternalRefsWithContext(ctx, item, baseDir, config, depth, false); err != nil {
 				return fmt.Errorf("failed to process array item %d: %w", i, err)
 			}
 		}
@@ -642,7 +658,7 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 	}
 	
 	// Обрабатываем компонент (разрешаем вложенные ссылки)
-	if err := r.replaceExternalRefs(ctx, componentCopy, nextBaseDir, config, depth+1); err != nil {
+	if err := r.replaceExternalRefsWithContext(ctx, componentCopy, nextBaseDir, config, depth+1, false); err != nil {
 		return "", fmt.Errorf("failed to process component: %w", err)
 	}
 
@@ -847,7 +863,7 @@ func (r *ReferenceResolver) expandPathRef(ctx context.Context, ref string, baseD
 	}
 
 	expanded := r.deepCopy(contentMap).(map[string]interface{})
-	if err := r.replaceExternalRefs(ctx, expanded, nextBaseDir, config, depth+1); err != nil {
+	if err := r.replaceExternalRefsWithContext(ctx, expanded, nextBaseDir, config, depth+1, false); err != nil {
 		return nil, fmt.Errorf("failed to process references in path: %w", err)
 	}
 
