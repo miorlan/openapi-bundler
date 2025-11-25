@@ -104,7 +104,7 @@ func (p *Parser) preserveOriginalOrder(node *yaml.Node, originalNode *yaml.Node)
 	}
 
 	nodeMap := p.buildNodeMap(node)
-	newContent := make([]*yaml.Node, 0)
+	newContent := make([]*yaml.Node, 0, len(node.Content))
 	processed := make(map[string]bool)
 
 	for i := 0; i < len(originalNode.Content); i += 2 {
@@ -116,7 +116,7 @@ func (p *Parser) preserveOriginalOrder(node *yaml.Node, originalNode *yaml.Node)
 		key := originalKeyNode.Value
 
 		if valueNode, exists := nodeMap[key]; exists {
-			newContent = append(newContent, p.createKeyNode(key), valueNode)
+			newContent = append(newContent, originalKeyNode, valueNode)
 			processed[key] = true
 
 			if key == "components" && originalValueNode.Kind == yaml.MappingNode {
@@ -144,7 +144,7 @@ func (p *Parser) preserveComponentsOrder(node *yaml.Node, originalNode *yaml.Nod
 	}
 
 	nodeMap := p.buildNodeMap(node)
-	newContent := make([]*yaml.Node, 0)
+	newContent := make([]*yaml.Node, 0, len(node.Content))
 	processed := make(map[string]bool)
 
 	for i := 0; i < len(originalNode.Content); i += 2 {
@@ -156,7 +156,7 @@ func (p *Parser) preserveComponentsOrder(node *yaml.Node, originalNode *yaml.Nod
 		key := originalKeyNode.Value
 
 		if valueNode, exists := nodeMap[key]; exists {
-			newContent = append(newContent, p.createKeyNode(key), valueNode)
+			newContent = append(newContent, originalKeyNode, valueNode)
 			processed[key] = true
 			p.preserveOriginalOrder(valueNode, originalValueNode)
 		}
