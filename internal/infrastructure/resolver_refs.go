@@ -312,17 +312,21 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 			componentType = parts[1]
 		}
 	} else {
+		// Нет фрагмента - пытаемся извлечь компонент из файла
 		if contentMap, ok := content.(map[string]interface{}); ok {
 			if comps, ok := contentMap["components"].(map[string]interface{}); ok {
 				totalComponents := 0
 				var foundComponent interface{}
+				var foundComponentName string
 				var foundType string
 				for _, ct := range componentTypes {
 					if section, ok := comps[ct].(map[string]interface{}); ok {
 						totalComponents += len(section)
 						if len(section) == 1 {
-							for _, comp := range section {
+							// Если только один компонент, извлекаем его имя
+							for name, comp := range section {
 								foundComponent = comp
+								foundComponentName = name
 								foundType = ct
 								break
 							}
@@ -332,15 +336,25 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 				if totalComponents == 1 && foundComponent != nil {
 					componentContent = foundComponent
 					componentType = foundType
+					// Используем имя компонента из файла
+					if foundComponentName != "" {
+						// Сохраняем имя в кэш сразу
+						originalRef := ref
+						if r.refToComponentName[originalRef] == "" {
+							r.refToComponentName[originalRef] = r.normalizeComponentName(foundComponentName)
+						}
+					}
 				} else if totalComponents > 0 {
 					return "", fmt.Errorf("external file contains multiple components, specify fragment: %s", ref)
 				} else {
 					return "", fmt.Errorf("external file does not contain components: %s", ref)
 				}
 			} else {
+				// Файл содержит схему напрямую (не в components)
 				if _, hasType := contentMap["type"]; hasType {
 					componentContent = contentMap
 					componentType = "schemas"
+					// Имя будет определено из имени файла в getPreferredComponentName
 				} else {
 					return "", fmt.Errorf("external file does not contain components section or schema: %s", ref)
 				}
@@ -357,11 +371,47 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 	}
 	
 	var componentName string
-	if cachedName, exists := r.refToComponentName[originalRef]; exists {
+	var foundComponentName string
+	
+	// Если компонент был извлечён из файла без фрагмента, используем его имя из файла
+	if fragment == "" {
+		if contentMap, ok := content.(map[string]interface{}); ok {
+			if comps, ok := contentMap["components"].(map[string]interface{}); ok {
+				for _, ct := range componentTypes {
+					if section, ok := comps[ct].(map[string]interface{}); ok {
+						if len(section) == 1 {
+							// Извлекаем имя компонента из файла
+							for name := range section {
+								foundComponentName = name
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	if cachedName, exists := r.refToComponentName[originalRef]; exists && cachedName != "" {
 		// Используем имя из кэша
 		componentName = cachedName
+	} else if foundComponentName != "" {
+		// ПРИОРИТЕТ: Используем имя компонента из файла (например, ChangePasswordRequest из файла)
+		componentName = r.normalizeComponentName(foundComponentName)
+		r.refToComponentName[originalRef] = componentName
+	} else if fragment != "" {
+		// Если есть фрагмент, используем имя из фрагмента
+		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
+		if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
+			componentName = r.normalizeComponentName(parts[2])
+			r.refToComponentName[originalRef] = componentName
+		} else {
+			// Вычисляем имя по стратегии
+			componentName = r.getPreferredComponentName(ref, fragment, componentType, componentContent)
+			r.refToComponentName[originalRef] = componentName
+		}
 	} else {
-		// Вычисляем имя по новой стратегии
+		// Вычисляем имя по стратегии (имя файла, title и т.д.)
 		componentName = r.getPreferredComponentName(ref, fragment, componentType, componentContent)
 		// Сохраняем в кэш
 		r.refToComponentName[originalRef] = componentName
