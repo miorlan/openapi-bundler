@@ -725,6 +725,9 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 	// Проверяем дедупликацию по хешу ПЕРЕД выбором имени
 	componentHash := r.hashComponent(componentCopy)
 	
+	// Увеличиваем счетчик использования компонента
+	r.componentUsageCount[componentHash]++
+	
 	// Если компонент с таким же содержимым уже существует, используем его имя
 	if existingName, exists := r.componentHashes[componentHash]; exists {
 		// Проверяем, что компонент действительно существует
@@ -1002,6 +1005,95 @@ func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref str
 	}
 
 	return nil, fmt.Errorf("component content is not a map: %s", ref)
+}
+
+// inlineSingleUseComponents заменяет $ref на inline содержимое для компонентов, используемых только один раз
+// Исключает компоненты, используемые внутри других схем (в properties, items и т.д.)
+func (r *ReferenceResolver) inlineSingleUseComponents(ctx context.Context, data map[string]interface{}) error {
+	components, ok := data["components"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	// Собираем компоненты, которые используются только один раз
+	singleUseComponents := make(map[string]string) // componentRef -> componentHash
+	for _, ct := range componentTypes {
+		section, ok := components[ct].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for name, component := range section {
+			componentHash := r.hashComponent(component)
+			if r.componentUsageCount[componentHash] == 1 {
+				componentRef := "#/components/" + ct + "/" + name
+				singleUseComponents[componentRef] = componentHash
+			}
+		}
+	}
+
+	if len(singleUseComponents) == 0 {
+		return nil
+	}
+
+	// Заменяем $ref на inline содержимое для компонентов, используемых только один раз
+	// Исключаем компоненты, используемые внутри других схем (в properties, items и т.д.)
+	return r.replaceRefsWithInline(ctx, data, singleUseComponents, components, false)
+}
+
+// replaceRefsWithInline заменяет $ref на inline содержимое в документе
+// skipNested: если true, пропускает $ref внутри properties, items и т.д.
+func (r *ReferenceResolver) replaceRefsWithInline(ctx context.Context, node interface{}, singleUseComponents map[string]string, components map[string]interface{}, skipNested bool) error {
+	switch n := node.(type) {
+	case map[string]interface{}:
+		// Проверяем, не находимся ли мы внутри properties, items и т.д.
+		isNested := skipNested || n["properties"] != nil || n["items"] != nil || n["additionalProperties"] != nil
+		
+		if refVal, ok := n["$ref"]; ok {
+			if refStr, ok := refVal.(string); ok {
+				if componentHash, isSingleUse := singleUseComponents[refStr]; isSingleUse {
+					// Не инлайним компоненты, используемые внутри других схем
+					if isNested {
+						return nil
+					}
+					// Находим компонент по хешу
+					for _, ct := range componentTypes {
+						section, ok := components[ct].(map[string]interface{})
+						if !ok {
+							continue
+						}
+						for name, component := range section {
+							if r.hashComponent(component) == componentHash {
+								// Заменяем $ref на полное содержимое
+								componentCopy := r.deepCopy(component)
+								if componentCopy != nil {
+									for k, v := range componentCopy.(map[string]interface{}) {
+										n[k] = v
+									}
+									delete(n, "$ref")
+									// Удаляем компонент из components
+									delete(section, name)
+								}
+								return nil
+							}
+						}
+					}
+				}
+			}
+		}
+		// Рекурсивно обрабатываем все поля
+		for _, v := range n {
+			if err := r.replaceRefsWithInline(ctx, v, singleUseComponents, components, isNested); err != nil {
+				return err
+			}
+		}
+	case []interface{}:
+		for _, item := range n {
+			if err := r.replaceRefsWithInline(ctx, item, singleUseComponents, components, skipNested); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // liftComponentRefs "поднимает" $ref в components: заменяет ссылки на реальное содержимое

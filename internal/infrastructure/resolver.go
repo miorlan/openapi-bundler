@@ -23,6 +23,7 @@ type ReferenceResolver struct {
 	componentHashes map[string]string
 	rootBasePath string
 	refToComponentName map[string]string // Кэш: исходный $ref -> имя компонента
+	componentUsageCount map[string]int // Счетчик использования компонентов по хешу
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
@@ -43,6 +44,7 @@ func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) do
 		fileCache: make(map[string]interface{}),
 		componentHashes: make(map[string]string),
 		refToComponentName: make(map[string]string),
+		componentUsageCount: make(map[string]int),
 	}
 }
 
@@ -55,6 +57,7 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 	r.fileCache = make(map[string]interface{})
 	r.componentHashes = make(map[string]string)
 	r.refToComponentName = make(map[string]string)
+	r.componentUsageCount = make(map[string]int)
 	for _, ct := range componentTypes {
 		r.components[ct] = make(map[string]interface{})
 		r.componentCounter[ct] = 0
@@ -190,6 +193,11 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 
 	// "Поднимаем" $ref в components после разрешения всех ссылок
 	if err := r.liftComponentRefs(ctx, data, config); err != nil {
+		return err
+	}
+
+	// Инлайним компоненты, которые используются только один раз
+	if err := r.inlineSingleUseComponents(ctx, data); err != nil {
 		return err
 	}
 
