@@ -85,20 +85,34 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 				if component == nil {
 					continue
 				}
+				// Проверяем уникальность имени перед добавлением
 				if existing, exists := section[name]; !exists {
+					// Имя уникально, добавляем компонент
 					section[name] = component
 				} else {
-					if _, isMap := existing.(map[string]interface{}); !isMap {
-						if _, isComponentMap := component.(map[string]interface{}); isComponentMap {
-							section[name] = component
-						}
+					// Имя уже существует, проверяем, не тот ли это же компонент
+					if r.componentsEqual(existing, component) {
+						// Это тот же компонент, пропускаем
+						continue
 					}
+					// Разные компоненты с одинаковым именем - это конфликт
+					// Используем уникальное имя
+					uniqueName := r.ensureUniqueComponentName(name, section, ct)
+					section[uniqueName] = component
+					// Обновляем хеш для нового имени
+					componentHash := r.hashComponent(component)
+					r.componentHashes[componentHash] = uniqueName
 				}
 			}
 		}
 	}
 
 	if err := r.replaceExternalRefs(ctx, data, basePath, config, 0); err != nil {
+		return err
+	}
+
+	// "Поднимаем" $ref в components после разрешения всех ссылок
+	if err := r.liftComponentRefs(ctx, data, config); err != nil {
 		return err
 	}
 

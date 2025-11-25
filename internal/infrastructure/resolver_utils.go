@@ -101,29 +101,18 @@ func (r *ReferenceResolver) deepCopy(src interface{}) interface{} {
 }
 
 func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentType string) string {
+	// Приоритет: использовать оригинальное имя из фрагмента, если оно есть
 	if fragment != "" {
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
 		if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
-			name := parts[2]
-			refPath := strings.Split(ref, "#")[0]
-			if refPath != "" && !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
-				dir := filepath.Dir(refPath)
-				if dir != "." && dir != "/" && !strings.Contains(dir, "/tmp/") && !strings.Contains(dir, "Temp") {
-					pathParts := strings.Split(strings.TrimPrefix(dir, "./"), "/")
-					if len(pathParts) > 0 && pathParts[len(pathParts)-1] != "" {
-						pathPrefix := strings.Join(pathParts, "_")
-						if pathPrefix != "" && pathPrefix != "." {
-							return pathPrefix + "_" + name
-						}
-					}
-				}
-			}
-			return name
+			// Используем оригинальное имя схемы из фрагмента
+			return parts[2]
 		} else if len(parts) >= 1 {
 			return parts[len(parts)-1]
 		}
 	}
 
+	// Если фрагмента нет, используем имя файла
 	refPath := strings.Split(ref, "#")[0]
 	if refPath != "" {
 		baseName := filepath.Base(refPath)
@@ -131,21 +120,10 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 		if ext != "" {
 			baseName = strings.TrimSuffix(baseName, ext)
 		}
-		if !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
-			dir := filepath.Dir(refPath)
-			if dir != "." && dir != "/" && !strings.Contains(dir, "/tmp/") && !strings.Contains(dir, "Temp") {
-				pathParts := strings.Split(strings.TrimPrefix(dir, "./"), "/")
-				if len(pathParts) > 0 && pathParts[len(pathParts)-1] != "" {
-					pathPrefix := strings.Join(pathParts, "_")
-					if pathPrefix != "" && pathPrefix != "." {
-						return pathPrefix + "_" + baseName
-					}
-				}
-			}
-		}
 		return baseName
 	}
 
+	// Последний резерв: генерируем имя
 	r.componentCounter[componentType]++
 	baseName := componentType[:len(componentType)-1]
 	if len(baseName) > 0 {
@@ -158,6 +136,7 @@ func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, sect
 	name := preferredName
 	counter := 0
 	for {
+		// Проверяем уникальность в финальной секции и в собранных компонентах
 		if _, exists := section[name]; !exists {
 			if _, existsInCollected := r.components[componentType][name]; !existsInCollected {
 				return name
@@ -242,5 +221,15 @@ func (r *ReferenceResolver) cleanNilValues(node interface{}) interface{} {
 	default:
 		return n
 	}
+}
+
+// resolveInternalRef разрешает внутреннюю ссылку и возвращает содержимое компонента
+func (r *ReferenceResolver) resolveInternalRef(ref string) (interface{}, error) {
+	if !strings.HasPrefix(ref, "#/components/") {
+		return nil, fmt.Errorf("not an internal component reference: %s", ref)
+	}
+	
+	path := strings.TrimPrefix(ref, "#/")
+	return r.resolveJSONPointer(r.rootDoc, "#/"+path)
 }
 

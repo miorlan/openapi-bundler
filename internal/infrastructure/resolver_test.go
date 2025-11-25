@@ -201,19 +201,39 @@ components:
 	}
 
 	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
-	userRef := schemas["UserRef"].(map[string]interface{})
-	ref, hasRef := userRef["$ref"]
-	if !hasRef {
-		t.Error("UserRef should contain $ref")
+	
+	// После "поднятия" $ref, UserRef должен содержать реальное содержимое, а не ссылку
+	userRef, exists := schemas["UserRef"]
+	if !exists {
+		t.Error("UserRef should exist in components/schemas")
 	}
-
-	refStr, ok := ref.(string)
+	
+	userRefMap, ok := userRef.(map[string]interface{})
 	if !ok {
-		t.Fatalf("$ref should be a string, got %T", ref)
+		t.Fatalf("UserRef should be a map, got %T", userRef)
 	}
-
-	if !strings.HasPrefix(refStr, "#/components/schemas/") {
-		t.Errorf("$ref should be an internal reference, got %s", refStr)
+	
+	// После "поднятия" должно быть реальное содержимое, а не $ref
+	if _, hasRef := userRefMap["$ref"]; hasRef {
+		t.Error("UserRef should not contain $ref after lifting - it should contain actual schema content")
+	}
+	
+	// Проверяем, что содержимое соответствует схеме User
+	if userType, hasType := userRefMap["type"]; !hasType || userType != "object" {
+		t.Error("UserRef should contain the actual schema content (type: object) after lifting")
+	}
+	
+	if properties, hasProps := userRefMap["properties"]; !hasProps {
+		t.Error("UserRef should contain properties after lifting")
+	} else {
+		propsMap, ok := properties.(map[string]interface{})
+		if !ok {
+			t.Errorf("properties should be a map, got %T", properties)
+		} else {
+			if _, hasName := propsMap["name"]; !hasName {
+				t.Error("UserRef should contain 'name' property after lifting")
+			}
+		}
 	}
 
 	if _, exists := schemas["User"]; !exists {
