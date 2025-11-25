@@ -119,7 +119,8 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 						}
 						delete(n, "$ref")
 						// Обрабатываем вложенные ссылки в развернутом содержимом
-						if err := r.replaceExternalRefsWithContext(ctx, n, baseDir, config, depth, true, true); err != nil {
+						// ВАЖНО: передаем inContentContext = false, чтобы вложенные ссылки создавали компоненты
+						if err := r.replaceExternalRefsWithContext(ctx, n, baseDir, config, depth, false, false); err != nil {
 							return fmt.Errorf("failed to process expanded schema: %w", err)
 						}
 						return nil
@@ -220,7 +221,8 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 									}
 									delete(schemaMap, "$ref")
 									// Обрабатываем вложенные ссылки в развернутом содержимом
-									if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, true, true); err != nil {
+									// ВАЖНО: передаем inContentContext = false, чтобы вложенные ссылки создавали компоненты
+									if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, false, false); err != nil {
 										return fmt.Errorf("failed to process expanded schema: %w", err)
 									}
 									continue
@@ -1027,6 +1029,7 @@ func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref str
 	}
 
 	// Обрабатываем вложенные ссылки, но НЕ извлекаем в components
+	// ВАЖНО: передаем inContentContext = false, чтобы вложенные ссылки создавали компоненты
 	nextBaseDir := baseDir
 	if strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") {
 		nextBaseDir = refPath[:strings.LastIndex(refPath, "/")+1]
@@ -1034,7 +1037,7 @@ func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref str
 		nextBaseDir = filepath.Dir(refPath)
 	}
 
-	if err := r.replaceExternalRefsWithContext(ctx, componentCopy, nextBaseDir, config, depth+1, true, true); err != nil {
+	if err := r.replaceExternalRefsWithContext(ctx, componentCopy, nextBaseDir, config, depth+1, false, false); err != nil {
 		return nil, fmt.Errorf("failed to process component content: %w", err)
 	}
 
