@@ -350,7 +350,10 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		}
 	}
 
+	// Получаем предпочтительное имя и нормализуем его
 	preferredName := r.getPreferredComponentName(ref, fragment, componentType)
+	preferredName = r.normalizeComponentName(preferredName)
+	
 	components := r.rootDoc["components"].(map[string]interface{})
 	section, ok := components[componentType].(map[string]interface{})
 	if !ok {
@@ -378,34 +381,17 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		return "", fmt.Errorf("component copy is nil for ref: %s", ref)
 	}
 	
-	// Проверяем на циклические ссылки перед обработкой
-	if componentMap, ok := componentCopy.(map[string]interface{}); ok {
-		if refVal, hasRef := componentMap["$ref"]; hasRef {
-			if refStr, ok := refVal.(string); ok {
-				// Если это внутренняя ссылка на ту же схему, это циклическая ссылка
-				if strings.HasPrefix(refStr, "#/components/"+componentType+"/") {
-					refName := strings.TrimPrefix(refStr, "#/components/"+componentType+"/")
-					// Проверяем, не ссылается ли схема сама на себя
-					if fragment != "" {
-						parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
-						if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
-							if parts[2] == refName {
-								return "", &domain.ErrCircularReference{Path: visitedKey + " -> self-reference"}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	
+	// Обрабатываем компонент (разрешаем вложенные ссылки)
 	if err := r.replaceExternalRefs(ctx, componentCopy, nextBaseDir, config, depth+1); err != nil {
 		return "", fmt.Errorf("failed to process component: %w", err)
 	}
 
-	// Проверяем дедупликацию по хешу перед выбором имени
+	// Проверяем дедупликацию по хешу ПЕРЕД выбором имени
 	componentHash := r.hashComponent(componentCopy)
+	
+	// Если компонент с таким же содержимым уже существует, используем его имя
 	if existingName, exists := r.componentHashes[componentHash]; exists {
+		// Проверяем, что компонент действительно существует
 		if existingComponent, ok := r.components[componentType][existingName]; ok {
 			if r.componentsEqual(existingComponent, componentCopy) {
 				// Компонент уже существует, используем существующую ссылку
@@ -425,19 +411,30 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 	}
 
 	// Определяем имя компонента с проверкой уникальности
-	var componentName string
-	if existingComponent, exists := section[preferredName]; exists {
-		// Если компонент с таким именем уже существует, проверяем, не тот ли это же компонент
-		if r.componentsEqual(existingComponent, componentCopy) {
-			// Это тот же компонент, используем существующее имя
-			componentName = preferredName
-		} else {
-			// Разные компоненты, нужно уникальное имя
-			componentName = r.ensureUniqueComponentName(preferredName, section, componentType)
+	componentName := r.ensureUniqueComponentName(preferredName, section, componentType)
+	
+	// Проверяем, не создаём ли мы самоссылку
+	if componentName == preferredName && fragment != "" {
+		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
+		if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
+			originalName := parts[2]
+			normalizedOriginalName := r.normalizeComponentName(originalName)
+			if normalizedOriginalName == componentName {
+				// Проверяем, не ссылается ли компонент сам на себя
+				if componentMap, ok := componentCopy.(map[string]interface{}); ok {
+					if refVal, hasRef := componentMap["$ref"]; hasRef {
+						if refStr, ok := refVal.(string); ok {
+							if strings.HasPrefix(refStr, "#/components/"+componentType+"/") {
+								refName := strings.TrimPrefix(refStr, "#/components/"+componentType+"/")
+								if refName == componentName {
+									return "", &domain.ErrCircularReference{Path: visitedKey + " -> self-reference to " + componentName}
+								}
+							}
+						}
+					}
+				}
+			}
 		}
-	} else {
-		// Проверяем уникальность в собранных компонентах
-		componentName = r.ensureUniqueComponentName(preferredName, section, componentType)
 	}
 
 	// Добавляем компонент только если его еще нет
@@ -447,8 +444,11 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 			r.componentHashes[componentHash] = componentName
 		}
 	} else {
-		// Компонент уже существует в секции, проверяем, не нужно ли обновить хеш
-		if _, existsInCollected := r.components[componentType][componentName]; !existsInCollected {
+		// Компонент уже существует в секции - проверяем, не дубликат ли это
+		existingComponent := section[componentName]
+		if !r.componentsEqual(existingComponent, componentCopy) {
+			// Разные компоненты с одинаковым именем - используем уникальное имя
+			componentName = r.ensureUniqueComponentName(componentName, section, componentType)
 			r.components[componentType][componentName] = componentCopy
 			r.componentHashes[componentHash] = componentName
 		}
@@ -561,13 +561,16 @@ func (r *ReferenceResolver) liftComponentRefs(ctx context.Context, data map[stri
 		return false
 	}
 
+	// Проходим по всем типам компонентов
 	for _, ct := range componentTypes {
 		section, ok := components[ct].(map[string]interface{})
 		if !ok {
 			continue
 		}
 
-		// Проходим по всем компонентам и "поднимаем" $ref
+		// Собираем список компонентов для "поднятия" (чтобы не изменять map во время итерации)
+		toLift := make(map[string]string) // name -> refName
+		
 		for name, component := range section {
 			if componentMap, ok := component.(map[string]interface{}); ok {
 				// Проверяем, является ли компонент только $ref
@@ -590,16 +593,32 @@ func (r *ReferenceResolver) liftComponentRefs(ctx context.Context, data map[stri
 									continue
 								}
 
-								// Получаем содержимое ссылки
+								// Проверяем, что целевой компонент существует
 								if targetComponent, exists := section[refName]; exists {
-									// "Поднимаем" ссылку: заменяем на содержимое
-									targetCopy := r.deepCopy(targetComponent)
-									section[name] = targetCopy
+									// Проверяем, что целевой компонент не является только $ref (чтобы избежать цепочки)
+									if targetMap, ok := targetComponent.(map[string]interface{}); ok {
+										if _, hasTargetRef := targetMap["$ref"]; hasTargetRef {
+											if len(targetMap) == 1 {
+												// Целевой компонент тоже только $ref - не поднимаем, чтобы избежать цепочек
+												continue
+											}
+										}
+									}
+									toLift[name] = refName
 								}
 							}
 						}
 					}
 				}
+			}
+		}
+
+		// Выполняем "поднятие"
+		for name, refName := range toLift {
+			if targetComponent, exists := section[refName]; exists {
+				// "Поднимаем" ссылку: заменяем на содержимое
+				targetCopy := r.deepCopy(targetComponent)
+				section[name] = targetCopy
 			}
 		}
 	}

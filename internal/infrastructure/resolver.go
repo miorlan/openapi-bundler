@@ -75,20 +75,37 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 		return err
 	}
 
+	// ОДИН проход replaceExternalRefs - он обработает все ссылки и соберёт компоненты
 	if err := r.replaceExternalRefs(ctx, data, basePath, config, 0); err != nil {
 		return err
 	}
 
+	// Объединяем собранные компоненты в финальную секцию с проверкой уникальности
 	for _, ct := range componentTypes {
 		if section, ok := components[ct].(map[string]interface{}); ok {
 			for name, component := range r.components[ct] {
 				if component == nil {
 					continue
 				}
+				
+				// Нормализуем имя перед добавлением
+				normalizedName := r.normalizeComponentName(name)
+				
+				// Проверяем дедупликацию по хешу
+				componentHash := r.hashComponent(component)
+				if existingName, exists := r.componentHashes[componentHash]; exists {
+					if existingName != normalizedName {
+						// Компонент с таким же содержимым уже существует под другим именем
+						// Используем существующее имя вместо создания дубликата
+						continue
+					}
+				}
+				
 				// Проверяем уникальность имени перед добавлением
-				if existing, exists := section[name]; !exists {
+				if existing, exists := section[normalizedName]; !exists {
 					// Имя уникально, добавляем компонент
-					section[name] = component
+					section[normalizedName] = component
+					r.componentHashes[componentHash] = normalizedName
 				} else {
 					// Имя уже существует, проверяем, не тот ли это же компонент
 					if r.componentsEqual(existing, component) {
@@ -97,18 +114,12 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 					}
 					// Разные компоненты с одинаковым именем - это конфликт
 					// Используем уникальное имя
-					uniqueName := r.ensureUniqueComponentName(name, section, ct)
+					uniqueName := r.ensureUniqueComponentName(normalizedName, section, ct)
 					section[uniqueName] = component
-					// Обновляем хеш для нового имени
-					componentHash := r.hashComponent(component)
 					r.componentHashes[componentHash] = uniqueName
 				}
 			}
 		}
-	}
-
-	if err := r.replaceExternalRefs(ctx, data, basePath, config, 0); err != nil {
-		return err
 	}
 
 	// "Поднимаем" $ref в components после разрешения всех ссылок

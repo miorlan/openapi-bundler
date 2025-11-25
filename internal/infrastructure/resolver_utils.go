@@ -100,36 +100,78 @@ func (r *ReferenceResolver) deepCopy(src interface{}) interface{} {
 	}
 }
 
+// normalizeComponentName нормализует имя компонента: убирает специальные символы, приводит к валидному формату
+func (r *ReferenceResolver) normalizeComponentName(name string) string {
+	if name == "" {
+		return name
+	}
+	
+	// Убираем специальные символы, оставляем только буквы, цифры и подчёркивания
+	var result strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			result.WriteRune(r)
+		} else if r == '-' || r == '.' || r == '/' || r == ' ' {
+			// Заменяем на подчёркивание
+			if result.Len() > 0 && result.String()[result.Len()-1] != '_' {
+				result.WriteRune('_')
+			}
+		}
+	}
+	
+	normalized := result.String()
+	
+	// Убираем множественные подчёркивания
+	for strings.Contains(normalized, "__") {
+		normalized = strings.ReplaceAll(normalized, "__", "_")
+	}
+	
+	// Убираем подчёркивания в начале и конце
+	normalized = strings.Trim(normalized, "_")
+	
+	// Если имя пустое после нормализации, генерируем имя
+	if normalized == "" {
+		r.componentCounter["schemas"]++
+		return fmt.Sprintf("Component%d", r.componentCounter["schemas"])
+	}
+	
+	// Первый символ должен быть буквой
+	if len(normalized) > 0 {
+		first := normalized[0]
+		if first >= '0' && first <= '9' {
+			normalized = "C" + normalized
+		}
+	}
+	
+	return normalized
+}
+
 func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentType string) string {
-	// Приоритет: использовать оригинальное имя из фрагмента, если оно есть
+	var name string
+	
+	// ВСЕГДА используем имя из фрагмента, если оно есть - НЕ строим из пути
 	if fragment != "" {
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
 		if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
 			// Используем оригинальное имя схемы из фрагмента
-			return parts[2]
+			name = parts[2]
 		} else if len(parts) >= 1 {
-			return parts[len(parts)-1]
+			name = parts[len(parts)-1]
 		}
 	}
-
-	// Если фрагмента нет, используем имя файла
-	refPath := strings.Split(ref, "#")[0]
-	if refPath != "" {
-		baseName := filepath.Base(refPath)
-		ext := filepath.Ext(baseName)
-		if ext != "" {
-			baseName = strings.TrimSuffix(baseName, ext)
+	
+	// Если имени нет, генерируем уникальное имя
+	if name == "" {
+		r.componentCounter[componentType]++
+		baseName := componentType[:len(componentType)-1]
+		if len(baseName) > 0 {
+			baseName = strings.ToUpper(baseName[:1]) + baseName[1:]
 		}
-		return baseName
+		name = fmt.Sprintf("%s%d", baseName, r.componentCounter[componentType])
 	}
-
-	// Последний резерв: генерируем имя
-	r.componentCounter[componentType]++
-	baseName := componentType[:len(componentType)-1]
-	if len(baseName) > 0 {
-		baseName = strings.ToUpper(baseName[:1]) + baseName[1:]
-	}
-	return fmt.Sprintf("%s%d", baseName, r.componentCounter[componentType])
+	
+	// Нормализуем имя
+	return r.normalizeComponentName(name)
 }
 
 func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, section map[string]interface{}, componentType string) string {
@@ -232,4 +274,5 @@ func (r *ReferenceResolver) resolveInternalRef(ref string) (interface{}, error) 
 	path := strings.TrimPrefix(ref, "#/")
 	return r.resolveJSONPointer(r.rootDoc, "#/"+path)
 }
+
 
