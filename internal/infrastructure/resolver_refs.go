@@ -110,22 +110,28 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 			}
 
 			// Если мы в контексте schema внутри content, не извлекаем схемы в components
-			// Внешние $ref должны быть разрешены, но схема должна остаться как $ref
+			// Внешние $ref должны быть разрешены и заменены на полное содержимое inline
 			if inSchemaContext && inContentContext {
 				refParts := strings.SplitN(refStr, "#", 2)
 				refPath := refParts[0]
 				if refPath != "" {
-					// Это внешний $ref в schema внутри content - разрешаем его, но не извлекаем в components
-					// Если это внешний файл, просто возвращаем пустую строку, чтобы не создавать компонент
+					// Это внешний $ref в schema внутри content - разрешаем его и заменяем на содержимое inline
+					// НЕ извлекаем в components
 					if strings.HasPrefix(refStr, "#") {
-						// Внутренняя ссылка - не обрабатываем
+						// Внутренняя ссылка - не обрабатываем здесь
 						return nil
 					}
-					// Внешний $ref - разрешаем, но не извлекаем в components
-					internalRef, err := r.resolveAndReplaceExternalRefWithContext(ctx, refStr, baseDir, config, depth, true)
-					if err == nil {
-						if internalRef != "" {
-							n["$ref"] = internalRef
+					// Внешний $ref - загружаем содержимое и заменяем $ref на полное содержимое
+					expanded, err := r.expandExternalRefInline(ctx, refStr, baseDir, config, depth)
+					if err == nil && expanded != nil {
+						// Заменяем $ref на полное содержимое
+						for k, v := range expanded {
+							n[k] = v
+						}
+						delete(n, "$ref")
+						// Обрабатываем вложенные ссылки в развернутом содержимом
+						if err := r.replaceExternalRefsWithContext(ctx, n, baseDir, config, depth, true, true); err != nil {
+							return fmt.Errorf("failed to process expanded schema: %w", err)
 						}
 						return nil
 					}
@@ -464,6 +470,34 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithContext(ctx context.
 	return r.resolveAndReplaceExternalRefWithType(ctx, ref, baseDir, config, depth, "", skipExtraction)
 }
 
+// loadAndParseRefFile загружает и парсит файл по ссылке (общая логика для resolveAndReplaceExternalRefWithType и expandExternalRefInline)
+func (r *ReferenceResolver) loadAndParseRefFile(ctx context.Context, refPath string, config domain.Config) (interface{}, error) {
+	if cached, ok := r.fileCache[refPath]; ok {
+		return cached, nil
+	}
+
+	data, err := r.fileLoader.Load(ctx, refPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, &ErrFileNotFound{Path: refPath}
+		}
+		return nil, fmt.Errorf("failed to load file: %w", err)
+	}
+
+	if config.MaxFileSize > 0 && int64(len(data)) > config.MaxFileSize {
+		return nil, fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
+	}
+
+	format := domain.DetectFormat(refPath)
+	var content interface{}
+	if err := r.parser.Unmarshal(data, &content, format); err != nil {
+		return nil, fmt.Errorf("failed to parse file: %w", err)
+	}
+
+	r.fileCache[refPath] = content
+	return content, nil
+}
+
 func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Context, ref string, baseDir string, config domain.Config, depth int, preferredComponentType string, skipExtraction bool) (string, error) {
 	refParts := strings.SplitN(ref, "#", 2)
 	refPath := refParts[0]
@@ -495,27 +529,9 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 	r.visited[visitedKey] = true
 	defer delete(r.visited, visitedKey)
 
-	var content interface{}
-	if cached, ok := r.fileCache[refPath]; ok {
-		content = cached
-	} else {
-		data, err := r.fileLoader.Load(ctx, refPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return "", &ErrFileNotFound{Path: refPath}
-			}
-			return "", fmt.Errorf("failed to load file: %w", err)
-		}
-
-		if config.MaxFileSize > 0 && int64(len(data)) > config.MaxFileSize {
-			return "", fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
-		}
-
-		format := domain.DetectFormat(refPath)
-		if err := r.parser.Unmarshal(data, &content, format); err != nil {
-			return "", fmt.Errorf("failed to parse file: %w", err)
-		}
-		r.fileCache[refPath] = content
+	content, err := r.loadAndParseRefFile(ctx, refPath, config)
+	if err != nil {
+		return "", err
 	}
 
 	var nextBaseDir string
@@ -659,8 +675,18 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 	}
 	
 	// Если skipExtraction = true, не извлекаем компонент в components
+	// Это используется для inline схем в content (responses, requestBody)
 	if skipExtraction {
 		// Возвращаем пустую строку, чтобы не создавать компонент
+		// Но все равно обрабатываем вложенные ссылки в компоненте
+		if componentContent != nil {
+			if componentMap, ok := componentContent.(map[string]interface{}); ok {
+				// Обрабатываем вложенные ссылки, но не извлекаем компонент
+				if err := r.replaceExternalRefsWithContext(ctx, componentMap, nextBaseDir, config, depth+1, false, false); err != nil {
+					return "", fmt.Errorf("failed to process component content: %w", err)
+				}
+			}
+		}
 		return "", nil
 	}
 
@@ -832,16 +858,21 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 		}
 	}
 
-	// Добавляем компонент в r.components только если его еще нет
-	if _, existsInCollected := r.components[componentType][componentName]; !existsInCollected {
-		r.components[componentType][componentName] = componentCopy
-		r.componentHashes[componentHash] = componentName
+	// Добавляем компонент в r.components только если его еще нет и если skipExtraction = false
+	if !skipExtraction {
+		if _, existsInCollected := r.components[componentType][componentName]; !existsInCollected {
+			r.components[componentType][componentName] = componentCopy
+			r.componentHashes[componentHash] = componentName
+		}
+
+		internalRef := "#/components/" + componentType + "/" + componentName
+		r.componentRefs[visitedKey] = internalRef
+
+		return internalRef, nil
 	}
 
-	internalRef := "#/components/" + componentType + "/" + componentName
-	r.componentRefs[visitedKey] = internalRef
-
-	return internalRef, nil
+	// Если skipExtraction = true, возвращаем пустую строку, чтобы не создавать компонент
+	return "", nil
 }
 
 func (r *ReferenceResolver) expandPathRef(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (map[string]interface{}, error) {
@@ -902,6 +933,75 @@ func (r *ReferenceResolver) expandPathRef(ctx context.Context, ref string, baseD
 	}
 
 	return expanded, nil
+}
+
+// expandExternalRefInline загружает содержимое внешнего $ref и возвращает его для inline-замены
+// НЕ создает компонент в components
+func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (map[string]interface{}, error) {
+	refParts := strings.SplitN(ref, "#", 2)
+	refPath := refParts[0]
+	fragment := ""
+	if len(refParts) > 1 {
+		fragment = "#" + refParts[1]
+	}
+
+	if refPath == "" {
+		return nil, fmt.Errorf("empty ref path")
+	}
+
+	refPath = r.getRefPath(refPath, baseDir)
+	if refPath == "" {
+		return nil, &domain.ErrInvalidReference{Ref: ref}
+	}
+
+	if !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
+		refPath = filepath.Clean(refPath)
+	}
+
+	content, err := r.loadAndParseRefFile(ctx, refPath, config)
+	if err != nil {
+		return nil, err
+	}
+
+	var componentContent interface{}
+	if fragment != "" {
+		extracted, err := r.resolveJSONPointer(content, fragment)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve fragment %s: %w", fragment, err)
+		}
+		componentContent = extracted
+	} else {
+		// Нет фрагмента - файл содержит схему напрямую
+		if contentMap, ok := content.(map[string]interface{}); ok {
+			componentContent = contentMap
+		} else {
+			return nil, fmt.Errorf("external file content is not a map: %s", ref)
+		}
+	}
+
+	// Копируем содержимое для inline-замены
+	componentCopy := r.deepCopy(componentContent)
+	if componentCopy == nil {
+		return nil, fmt.Errorf("component copy is nil for ref: %s", ref)
+	}
+
+	// Обрабатываем вложенные ссылки, но НЕ извлекаем в components
+	nextBaseDir := baseDir
+	if strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") {
+		nextBaseDir = refPath[:strings.LastIndex(refPath, "/")+1]
+	} else {
+		nextBaseDir = filepath.Dir(refPath)
+	}
+
+	if err := r.replaceExternalRefsWithContext(ctx, componentCopy, nextBaseDir, config, depth+1, true, true); err != nil {
+		return nil, fmt.Errorf("failed to process component content: %w", err)
+	}
+
+	if componentMap, ok := componentCopy.(map[string]interface{}); ok {
+		return componentMap, nil
+	}
+
+	return nil, fmt.Errorf("component content is not a map: %s", ref)
 }
 
 // liftComponentRefs "поднимает" $ref в components: заменяет ссылки на реальное содержимое

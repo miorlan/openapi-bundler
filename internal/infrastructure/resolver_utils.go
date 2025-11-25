@@ -170,18 +170,9 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 	// Убираем подчёркивания в начале и конце (но не дефисы)
 	normalized = strings.Trim(normalized, "_")
 	
-	// Если имя пустое после нормализации, генерируем имя
+	// Если имя пустое после нормализации, используем fallback
 	if normalized == "" {
-		r.componentCounter["schemas"]++
-		b := builderPool.Get().(*strings.Builder)
-		defer func() {
-			b.Reset()
-			builderPool.Put(b)
-		}()
-		b.Grow(len("Component") + 10)
-		b.WriteString("Component")
-		b.WriteString(strconv.Itoa(r.componentCounter["schemas"]))
-		return b.String()
+		return "Component"
 	}
 	
 	// Первый символ должен быть буквой (не цифрой и не подчёркиванием)
