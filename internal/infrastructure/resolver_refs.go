@@ -25,6 +25,33 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 
 	switch n := node.(type) {
 	case map[string]interface{}:
+		// Специальная обработка для параметров в методах HTTP (get, post, put, delete, etc.)
+		// Параметры должны оставаться как $ref, а не разворачиваться
+		// ЭТО ДОЛЖНО БЫТЬ ПЕРЕД обработкой $ref, чтобы сработать для параметров в методах
+		if paramsArray, ok := n["parameters"].([]interface{}); ok {
+			for i, param := range paramsArray {
+				if paramMap, ok := param.(map[string]interface{}); ok {
+					if refVal, hasRef := paramMap["$ref"]; hasRef {
+						if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
+							// Это внешняя ссылка на параметр
+							// Создаём компонент в components.parameters, но оставляем $ref в массиве
+							internalRef, err := r.resolveAndReplaceExternalRefWithType(ctx, refStr, baseDir, config, depth, "parameters", false)
+							if err == nil && internalRef != "" {
+								// Заменяем элемент массива на только $ref
+								paramsArray[i] = map[string]interface{}{
+									"$ref": internalRef,
+								}
+								continue
+							}
+						} else if refStr, ok := refVal.(string); ok && strings.HasPrefix(refStr, "#/components/parameters/") {
+							// Это уже внутренняя ссылка на параметр - не обрабатываем дальше
+							continue
+						}
+					}
+				}
+			}
+		}
+
 		if _, hasAllOf := n["allOf"]; hasAllOf {
 			if allOf, ok := n["allOf"].([]interface{}); ok {
 				for i, item := range allOf {
@@ -105,32 +132,6 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				return &domain.ErrInvalidReference{Ref: fmt.Sprintf("%v", refVal)}
 			}
 
-			// Если мы в контексте schema внутри content, не извлекаем схемы в components
-			// Внешние $ref должны быть разрешены и заменены на полное содержимое inline
-			if inSchemaContext && inContentContext {
-				// Проверяем, является ли это внешним $ref
-				if !strings.HasPrefix(refStr, "#") {
-					// Внешний $ref - загружаем содержимое и заменяем $ref на полное содержимое
-					expanded, err := r.expandExternalRefInline(ctx, refStr, baseDir, config, depth)
-					if err == nil && expanded != nil {
-						// Заменяем $ref на полное содержимое
-						for k, v := range expanded {
-							n[k] = v
-						}
-						delete(n, "$ref")
-						// Обрабатываем вложенные ссылки в развернутом содержимом
-						// ВАЖНО: передаем inContentContext = false, чтобы вложенные ссылки создавали компоненты
-						if err := r.replaceExternalRefsWithContext(ctx, n, baseDir, config, depth, false, false); err != nil {
-							return fmt.Errorf("failed to process expanded schema: %w", err)
-						}
-						return nil
-					}
-					// Если не удалось разрешить, продолжаем обычную обработку
-				} else {
-					// Внутренняя ссылка в schema внутри content - обрабатываем, но не извлекаем
-					return nil
-				}
-			}
 
 			if strings.HasPrefix(refStr, "#") {
 				return nil
@@ -148,10 +149,6 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 			}
 
 			if fragment != "" && strings.HasPrefix(fragment, "#/components/") {
-				// Если мы в контексте schema внутри content, не обрабатываем через обычный путь
-				if inSchemaContext && inContentContext {
-					return nil
-				}
 				internalRef, err := r.resolveAndReplaceExternalRefWithContext(ctx, refStr, baseDir, config, depth, false)
 				if err != nil {
 					return fmt.Errorf("failed to replace external ref %s: %w", refStr, err)
@@ -161,12 +158,6 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 					n["$ref"] = internalRef
 				}
 
-				return nil
-			}
-
-			// Если мы в контексте schema внутри content, не обрабатываем через обычный путь
-			// (уже обработано выше через expandExternalRefInline)
-			if inSchemaContext && inContentContext {
 				return nil
 			}
 
@@ -205,174 +196,20 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 			}
 
 			// Специальная обработка для schema в content (responses, requestBody)
-			// Inline схемы должны оставаться inline, а не извлекаться в components
+			// Внешние $ref в schema должны создавать компоненты и оставаться как $ref
 			if k == "schema" && inContentContext {
 				if schemaMap, ok := v.(map[string]interface{}); ok {
-					// Проверяем, есть ли внешний $ref в schema
-					if refVal, hasRef := schemaMap["$ref"]; hasRef {
-						if refStr, ok := refVal.(string); ok {
-							// Если это внешний $ref, заменяем на inline содержимое
-							if !strings.HasPrefix(refStr, "#") {
-								expanded, err := r.expandExternalRefInline(ctx, refStr, baseDir, config, depth)
-								if err == nil && expanded != nil {
-									// Заменяем $ref на полное содержимое
-									for k, v := range expanded {
-										schemaMap[k] = v
-									}
-									delete(schemaMap, "$ref")
-									// Обрабатываем вложенные ссылки в развернутом содержимом
-									// ВАЖНО: передаем inContentContext = false, чтобы вложенные ссылки создавали компоненты
-									if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, false, false); err != nil {
-										return fmt.Errorf("failed to process expanded schema: %w", err)
-									}
-									continue
-								}
-							}
-						}
-					}
-					// Обрабатываем schema в content с флагом, что мы в контексте schema
-					// Это предотвратит извлечение inline схем в components
-					if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, true, true); err != nil {
+					// Обрабатываем schema в content - внешние $ref создают компоненты
+					if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, false, false); err != nil {
 						return fmt.Errorf("failed to process schema: %w", err)
 					}
 					continue
 				}
 			}
 
-			// Специальная обработка для параметров в методах HTTP (get, post, put, delete, etc.)
-			// Параметры должны оставаться как $ref, а не разворачиваться
-			// ЭТО ДОЛЖНО БЫТЬ ПЕРЕД обработкой paths, чтобы сработать для параметров в методах
+			// Параметры уже обработаны выше, пропускаем
 			if k == "parameters" {
-				if paramsArray, ok := v.([]interface{}); ok {
-					for i, param := range paramsArray {
-						if paramMap, ok := param.(map[string]interface{}); ok {
-							if refVal, hasRef := paramMap["$ref"]; hasRef {
-								if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
-									// Это внешняя ссылка на параметр
-									// Создаём компонент в components.parameters, но оставляем $ref в массиве
-									internalRef, err := r.resolveAndReplaceExternalRefWithType(ctx, refStr, baseDir, config, depth, "parameters", false)
-									if err == nil && internalRef != "" {
-										// Заменяем элемент массива на только $ref
-										paramsArray[i] = map[string]interface{}{
-											"$ref": internalRef,
-										}
-										continue
-									}
-								} else if refStr, ok := refVal.(string); ok && strings.HasPrefix(refStr, "#/components/parameters/") {
-									// Это уже внутренняя ссылка на параметр - не обрабатываем дальше
-									continue
-								}
-							} else {
-								// Параметр уже развернут (не содержит $ref)
-								// Проверяем, не совпадает ли он с каким-либо компонентом в components.parameters
-								// Если да, заменяем на $ref
-								if components, ok := r.rootDoc["components"].(map[string]interface{}); ok {
-									if paramsSection, ok := components["parameters"].(map[string]interface{}); ok {
-										paramHash := r.hashComponent(paramMap)
-										for paramName, paramComponent := range paramsSection {
-											if paramCompMap, ok := paramComponent.(map[string]interface{}); ok {
-												// Пропускаем компоненты, которые являются только $ref
-												if _, hasRef := paramCompMap["$ref"]; hasRef && len(paramCompMap) == 1 {
-													continue
-												}
-												if r.componentsEqual(paramMap, paramCompMap) || r.hashComponent(paramCompMap) == paramHash {
-													// Найден совпадающий компонент - заменяем на $ref
-													paramsArray[i] = map[string]interface{}{
-														"$ref": "#/components/parameters/" + paramName,
-													}
-													goto nextParam
-												}
-											}
-										}
-									}
-								}
-								// Также проверяем в r.components (еще не добавленных в rootDoc)
-								if paramsSection, ok := r.components["parameters"]; ok {
-									paramHash := r.hashComponent(paramMap)
-									for paramName, paramComponent := range paramsSection {
-										if paramCompMap, ok := paramComponent.(map[string]interface{}); ok {
-											// Пропускаем компоненты, которые являются только $ref
-											if _, hasRef := paramCompMap["$ref"]; hasRef && len(paramCompMap) == 1 {
-												continue
-											}
-											if r.componentsEqual(paramMap, paramCompMap) || r.hashComponent(paramCompMap) == paramHash {
-												// Найден совпадающий компонент - заменяем на $ref
-												normalizedName := r.normalizeComponentName(paramName)
-												paramsArray[i] = map[string]interface{}{
-													"$ref": "#/components/parameters/" + normalizedName,
-												}
-												goto nextParam
-											}
-										}
-									}
-								}
-							}
-							// Если элемент содержит только $ref (внутреннюю), не обрабатываем рекурсивно
-							if len(paramMap) == 1 {
-								if _, hasRef := paramMap["$ref"]; hasRef {
-									continue
-								}
-							}
-						}
-					nextParam:
-						// Для параметров без внешней ссылки обрабатываем рекурсивно (внутренние ссылки)
-						// НО только если параметр не был заменен на $ref
-						if paramMap, ok := paramsArray[i].(map[string]interface{}); ok {
-							if _, hasRef := paramMap["$ref"]; !hasRef {
-								if err := r.replaceExternalRefsWithContext(ctx, paramsArray[i], baseDir, config, depth, false, false); err != nil {
-									return fmt.Errorf("failed to process parameter %d: %w", i, err)
-								}
-								// После обработки проверяем, не совпадает ли параметр с компонентом
-								// Если да, заменяем на $ref
-								if updatedParamMap, ok := paramsArray[i].(map[string]interface{}); ok {
-									if _, hasRef := updatedParamMap["$ref"]; !hasRef {
-										// Параметр все еще развернут - проверяем совпадение с компонентами
-										paramHash := r.hashComponent(updatedParamMap)
-										if components, ok := r.rootDoc["components"].(map[string]interface{}); ok {
-											if paramsSection, ok := components["parameters"].(map[string]interface{}); ok {
-												for paramName, paramComponent := range paramsSection {
-													if paramCompMap, ok := paramComponent.(map[string]interface{}); ok {
-														// Пропускаем компоненты, которые являются только $ref
-														if _, hasRef := paramCompMap["$ref"]; hasRef && len(paramCompMap) == 1 {
-															continue
-														}
-														if r.componentsEqual(updatedParamMap, paramCompMap) || r.hashComponent(paramCompMap) == paramHash {
-															// Найден совпадающий компонент - заменяем на $ref
-															paramsArray[i] = map[string]interface{}{
-																"$ref": "#/components/parameters/" + paramName,
-															}
-															break
-														}
-													}
-												}
-											}
-										}
-										// Также проверяем в r.components
-										if paramsSection, ok := r.components["parameters"]; ok {
-											for paramName, paramComponent := range paramsSection {
-												if paramCompMap, ok := paramComponent.(map[string]interface{}); ok {
-													// Пропускаем компоненты, которые являются только $ref
-													if _, hasRef := paramCompMap["$ref"]; hasRef && len(paramCompMap) == 1 {
-														continue
-													}
-													if r.componentsEqual(updatedParamMap, paramCompMap) || r.hashComponent(paramCompMap) == paramHash {
-														// Найден совпадающий компонент - заменяем на $ref
-														normalizedName := r.normalizeComponentName(paramName)
-														paramsArray[i] = map[string]interface{}{
-															"$ref": "#/components/parameters/" + normalizedName,
-														}
-														break
-													}
-												}
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-					continue
-				}
+				continue
 			}
 
 			if k == "paths" {
