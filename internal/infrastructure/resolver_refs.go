@@ -15,7 +15,7 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 		return ctx.Err()
 	}
 
-	if config.MaxDepth > 0 && depth >= config.MaxDepth {
+	if config.MaxDepth > 0 && depth > config.MaxDepth {
 		return fmt.Errorf("maximum recursion depth %d exceeded", config.MaxDepth)
 	}
 
@@ -151,6 +151,21 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 		}
 
 		for k, v := range n {
+			// Специальная обработка для schema в content (responses, requestBody)
+			// Inline схемы должны оставаться inline, а не извлекаться в components
+			if k == "schema" {
+				if schemaMap, ok := v.(map[string]interface{}); ok {
+					// Если это inline схема (без $ref), обрабатываем только вложенные ссылки
+					if _, hasRef := schemaMap["$ref"]; !hasRef {
+						// Это inline схема - обрабатываем только вложенные ссылки, но не извлекаем в components
+						if err := r.replaceExternalRefs(ctx, schemaMap, baseDir, config, depth); err != nil {
+							return fmt.Errorf("failed to process inline schema: %w", err)
+						}
+						continue
+					}
+				}
+			}
+
 			// Специальная обработка для параметров в методах HTTP (get, post, put, delete, etc.)
 			// Параметры должны оставаться как $ref, а не разворачиваться
 			// ЭТО ДОЛЖНО БЫТЬ ПЕРЕД обработкой paths, чтобы сработать для параметров в методах

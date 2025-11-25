@@ -2,6 +2,7 @@ package infrastructure
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/miorlan/openapi-bundler/internal/domain"
 )
@@ -25,8 +26,8 @@ type ReferenceResolver struct {
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
-	components := make(map[string]map[string]interface{})
-	componentCounter := make(map[string]int)
+	components := make(map[string]map[string]interface{}, len(componentTypes))
+	componentCounter := make(map[string]int, len(componentTypes))
 	for _, ct := range componentTypes {
 		components[ct] = make(map[string]interface{})
 		componentCounter[ct] = 0
@@ -76,6 +77,14 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 
 	if err := r.expandSectionRefs(ctx, data, basePath, config); err != nil {
 		return err
+	}
+
+	// Предзагружаем все внешние файлы параллельно (только если нет ограничения глубины)
+	// При ограничении глубины предзагрузка может нарушить логику проверки глубины
+	if config.MaxDepth == 0 {
+		if err := r.preloadExternalFiles(ctx, data, basePath, config); err != nil {
+			return fmt.Errorf("failed to preload external files: %w", err)
+		}
 	}
 
 	// ОДИН проход replaceExternalRefs - он обработает все ссылки и соберёт компоненты

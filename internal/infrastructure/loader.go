@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miorlan/openapi-bundler/internal/domain"
@@ -15,17 +16,28 @@ import (
 
 type FileLoader struct {
 	client *http.Client
+	sem    chan struct{} // семафор для ограничения параллелизма
 }
+
+const defaultMaxConcurrent = 10
 
 func NewFileLoader() domain.FileLoader {
 	return NewFileLoaderWithTimeout(30 * time.Second)
 }
 
 func NewFileLoaderWithTimeout(timeout time.Duration) domain.FileLoader {
+	return NewFileLoaderWithTimeoutAndConcurrency(timeout, defaultMaxConcurrent)
+}
+
+func NewFileLoaderWithTimeoutAndConcurrency(timeout time.Duration, maxConcurrent int) domain.FileLoader {
+	if maxConcurrent <= 0 {
+		maxConcurrent = defaultMaxConcurrent
+	}
 	return &FileLoader{
 		client: &http.Client{
 			Timeout: timeout,
 		},
+		sem: make(chan struct{}, maxConcurrent),
 	}
 }
 
@@ -74,4 +86,56 @@ func (fl *FileLoader) loadHTTP(ctx context.Context, url string) ([]byte, error) 
 	}
 
 	return data, nil
+}
+
+// LoadMany загружает несколько файлов параллельно с ограничением через worker pool
+func (fl *FileLoader) LoadMany(ctx context.Context, paths []string) (map[string][]byte, error) {
+	if len(paths) == 0 {
+		return make(map[string][]byte), nil
+	}
+
+	results := make(map[string][]byte, len(paths))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(paths))
+
+	for _, path := range paths {
+		wg.Add(1)
+		go func(p string) {
+			defer wg.Done()
+
+			// Захватываем семафор для ограничения параллелизма
+			if fl.sem != nil {
+				select {
+				case fl.sem <- struct{}{}:
+					defer func() { <-fl.sem }()
+				case <-ctx.Done():
+					errCh <- ctx.Err()
+					return
+				}
+			}
+
+			data, err := fl.Load(ctx, p)
+			if err != nil {
+				select {
+				case errCh <- fmt.Errorf("failed to load %s: %w", p, err):
+				case <-ctx.Done():
+				}
+				return
+			}
+
+			mu.Lock()
+			results[p] = data
+			mu.Unlock()
+		}(path)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	if len(errCh) > 0 {
+		return nil, <-errCh
+	}
+
+	return results, nil
 }

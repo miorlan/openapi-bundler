@@ -5,7 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+)
+
+var (
+	builderPool = sync.Pool{
+		New: func() interface{} {
+			return &strings.Builder{}
+		},
+	}
 )
 
 func (r *ReferenceResolver) getRefPath(ref string, baseDir string) string {
@@ -84,7 +94,7 @@ func (r *ReferenceResolver) resolveJSONPointer(doc interface{}, pointer string) 
 func (r *ReferenceResolver) deepCopy(src interface{}) interface{} {
 	switch v := src.(type) {
 	case map[string]interface{}:
-		dst := make(map[string]interface{})
+		dst := make(map[string]interface{}, len(v))
 		for k, val := range v {
 			dst[k] = r.deepCopy(val)
 		}
@@ -131,7 +141,11 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 	
 	// Убираем специальные символы, оставляем только буквы, цифры, подчёркивания и дефисы
 	// Дефисы сохраняем, так как они часто используются в именах параметров (например, X-Device-Id)
-	var result strings.Builder
+	result := builderPool.Get().(*strings.Builder)
+	defer func() {
+		result.Reset()
+		builderPool.Put(result)
+	}()
 	for _, char := range name {
 		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' || char == '-' {
 			result.WriteRune(char)
@@ -159,7 +173,15 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 	// Если имя пустое после нормализации, генерируем имя
 	if normalized == "" {
 		r.componentCounter["schemas"]++
-		return fmt.Sprintf("Component%d", r.componentCounter["schemas"])
+		b := builderPool.Get().(*strings.Builder)
+		defer func() {
+			b.Reset()
+			builderPool.Put(b)
+		}()
+		b.Grow(len("Component") + 10)
+		b.WriteString("Component")
+		b.WriteString(strconv.Itoa(r.componentCounter["schemas"]))
+		return b.String()
 	}
 	
 	// Первый символ должен быть буквой (не цифрой и не подчёркиванием)
@@ -225,7 +247,11 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 	if refPath != "" {
 		// Создаём имя на основе пути к файлу
 		pathParts := strings.Split(strings.Trim(refPath, "./"), "/")
-		var pathName strings.Builder
+		pathName := builderPool.Get().(*strings.Builder)
+		defer func() {
+			pathName.Reset()
+			builderPool.Put(pathName)
+		}()
 		pathName.WriteString("Inline_")
 		for _, part := range pathParts {
 			if part != "" {
@@ -250,7 +276,11 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 					// Используем путь, если он есть, иначе только тип
 					if refPath != "" {
 						pathParts := strings.Split(strings.Trim(refPath, "./"), "/")
-						var pathName strings.Builder
+						pathName := builderPool.Get().(*strings.Builder)
+						defer func() {
+							pathName.Reset()
+							builderPool.Put(pathName)
+						}()
 						pathName.WriteString("Inline_")
 						for _, part := range pathParts {
 							if part != "" {
@@ -261,7 +291,15 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 						pathName.WriteString(typeName)
 						return r.normalizeComponentName(pathName.String())
 					}
-					return r.normalizeComponentName(fmt.Sprintf("Inline_%s", typeName))
+					b := builderPool.Get().(*strings.Builder)
+					defer func() {
+						b.Reset()
+						builderPool.Put(b)
+					}()
+					b.Grow(len("Inline_") + len(typeName))
+					b.WriteString("Inline_")
+					b.WriteString(typeName)
+					return r.normalizeComponentName(b.String())
 				}
 			}
 		}
@@ -270,7 +308,11 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 	// Самый последний резерв: используем путь из ref, если он есть
 	if refPath != "" {
 		pathParts := strings.Split(strings.Trim(refPath, "./"), "/")
-		var pathName strings.Builder
+		pathName := builderPool.Get().(*strings.Builder)
+		defer func() {
+			pathName.Reset()
+			builderPool.Put(pathName)
+		}()
 		pathName.WriteString("Inline_")
 		for _, part := range pathParts {
 			if part != "" {
@@ -287,7 +329,15 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 	if len(baseName) > 0 {
 		baseName = strings.Title(baseName) // schema -> Schema
 	}
-	return r.normalizeComponentName(fmt.Sprintf("Inline_%s", baseName))
+	b := builderPool.Get().(*strings.Builder)
+	defer func() {
+		b.Reset()
+		builderPool.Put(b)
+	}()
+	b.Grow(len("Inline_") + len(baseName))
+	b.WriteString("Inline_")
+	b.WriteString(baseName)
+	return r.normalizeComponentName(b.String())
 }
 
 func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, section map[string]interface{}, componentType string) string {
@@ -303,13 +353,24 @@ func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, sect
 		}
 		counter++
 		// Добавляем число к имени, сохраняя префикс Inline_ если он есть
+		b := builderPool.Get().(*strings.Builder)
+		defer func() {
+			b.Reset()
+			builderPool.Put(b)
+		}()
 		if strings.HasPrefix(preferredName, "Inline_") {
 			baseName := strings.TrimPrefix(preferredName, "Inline_")
-			name = fmt.Sprintf("Inline_%s%d", baseName, counter)
+			b.Grow(len("Inline_") + len(baseName) + 10)
+			b.WriteString("Inline_")
+			b.WriteString(baseName)
+			b.WriteString(strconv.Itoa(counter))
 		} else {
 			// Для реальных имён (RequestGuests, ExistingGuest и т.д.) просто добавляем число
-			name = fmt.Sprintf("%s%d", preferredName, counter)
+			b.Grow(len(preferredName) + 10)
+			b.WriteString(preferredName)
+			b.WriteString(strconv.Itoa(counter))
 		}
+		name = b.String()
 	}
 }
 
@@ -326,7 +387,7 @@ func (r *ReferenceResolver) hashComponent(component interface{}) string {
 func (r *ReferenceResolver) normalizeComponent(component interface{}) interface{} {
 	switch v := component.(type) {
 	case map[string]interface{}:
-		normalized := make(map[string]interface{})
+		normalized := make(map[string]interface{}, len(v))
 		for k, val := range v {
 			if k == "$ref" {
 				continue

@@ -82,10 +82,14 @@ func (p *Parser) createKeyNode(key string) *yaml.Node {
 }
 
 func (p *Parser) buildNodeMap(node *yaml.Node) map[string]*yaml.Node {
-	nodeMap := make(map[string]*yaml.Node)
 	if node == nil || node.Kind != yaml.MappingNode {
-		return nodeMap
+		return make(map[string]*yaml.Node)
 	}
+	expectedSize := len(node.Content) / 2
+	if expectedSize < 1 {
+		expectedSize = 1
+	}
+	nodeMap := make(map[string]*yaml.Node, expectedSize)
 	for i := 0; i < len(node.Content); i += 2 {
 		if i+1 >= len(node.Content) {
 			break
@@ -105,7 +109,7 @@ func (p *Parser) preserveOriginalOrder(node *yaml.Node, originalNode *yaml.Node)
 
 	nodeMap := p.buildNodeMap(node)
 	newContent := make([]*yaml.Node, 0, len(node.Content))
-	processed := make(map[string]bool)
+	processed := make(map[string]bool, len(nodeMap))
 
 	for i := 0; i < len(originalNode.Content); i += 2 {
 		if i+1 >= len(originalNode.Content) {
@@ -145,7 +149,7 @@ func (p *Parser) preserveComponentsOrder(node *yaml.Node, originalNode *yaml.Nod
 
 	nodeMap := p.buildNodeMap(node)
 	newContent := make([]*yaml.Node, 0, len(node.Content))
-	processed := make(map[string]bool)
+	processed := make(map[string]bool, len(nodeMap))
 
 	for i := 0; i < len(originalNode.Content); i += 2 {
 		if i+1 >= len(originalNode.Content) {
@@ -189,8 +193,12 @@ func (p *Parser) reorderYAMLNode(node *yaml.Node) {
 		"webhooks",
 	}
 
-	nodeMap := make(map[string]*yaml.Node)
-	xFields := make([]*yaml.Node, 0)
+	expectedSize := len(node.Content) / 2
+	if expectedSize < 1 {
+		expectedSize = 1
+	}
+	nodeMap := make(map[string]*yaml.Node, expectedSize)
+	xFields := make([]*yaml.Node, 0, expectedSize/4)
 
 	for i := 0; i < len(node.Content); i += 2 {
 		if i+1 >= len(node.Content) {
@@ -206,8 +214,8 @@ func (p *Parser) reorderYAMLNode(node *yaml.Node) {
 		}
 	}
 
-	newContent := make([]*yaml.Node, 0)
-	processed := make(map[string]bool)
+	newContent := make([]*yaml.Node, 0, len(nodeMap))
+	processed := make(map[string]bool, len(nodeMap))
 
 	for _, key := range fieldOrder {
 		if valueNode, exists := nodeMap[key]; exists {
@@ -253,8 +261,8 @@ func (p *Parser) reorderComponentsYAMLNode(node *yaml.Node) {
 
 	nodeMap := p.buildNodeMap(node)
 
-	newContent := make([]*yaml.Node, 0)
-	processed := make(map[string]bool)
+	newContent := make([]*yaml.Node, 0, len(nodeMap))
+	processed := make(map[string]bool, len(nodeMap))
 
 	for _, key := range componentOrder {
 		if valueNode, exists := nodeMap[key]; exists {
