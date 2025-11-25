@@ -110,7 +110,31 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 					section[normalizedName] = component
 					r.componentHashes[componentHash] = normalizedName
 				} else {
-					// Имя уже существует, проверяем, не тот ли это же компонент
+					// Имя уже существует
+					// СНАЧАЛА проверяем, не является ли существующий компонент только $ref
+					if existingMap, ok := existing.(map[string]interface{}); ok {
+						if refVal, hasRef := existingMap["$ref"]; hasRef {
+							if len(existingMap) == 1 {
+								// Существующий компонент - это только $ref
+								// Проверяем, не ссылается ли он сам на себя
+								if refStr, ok := refVal.(string); ok {
+									expectedRef := "#/components/" + ct + "/" + normalizedName
+									if refStr == expectedRef {
+										// Это самоссылка (Error: { $ref: '#/components/schemas/Error' })
+										// Заменяем на реальное содержимое
+										section[normalizedName] = component
+										r.componentHashes[componentHash] = normalizedName
+										continue
+									}
+								}
+								// Это ссылка на другой компонент, заменяем на реальное содержимое
+								section[normalizedName] = component
+								r.componentHashes[componentHash] = normalizedName
+								continue
+							}
+						}
+					}
+					// Проверяем, не тот ли это же компонент
 					if r.componentsEqual(existing, component) {
 						// Это тот же компонент, пропускаем
 						continue

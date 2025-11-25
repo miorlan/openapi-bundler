@@ -473,14 +473,6 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		}
 	}
 
-	// Проверяем уникальность имени
-	componentName = r.ensureUniqueComponentName(componentName, section, componentType)
-	
-	// Обновляем кэш, если имя изменилось из-за конфликта
-	if componentName != r.refToComponentName[originalRef] {
-		r.refToComponentName[originalRef] = componentName
-	}
-	
 	// Проверяем, не создаём ли мы самоссылку
 	if fragment != "" {
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
@@ -505,21 +497,76 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		}
 	}
 
+	// Проверяем, существует ли компонент с таким именем в секции
+	if existingComponent, exists := section[componentName]; exists {
+		// Компонент уже существует в секции
+		// Проверяем, не является ли существующий компонент только $ref
+		if existingMap, ok := existingComponent.(map[string]interface{}); ok {
+			if refVal, hasRef := existingMap["$ref"]; hasRef {
+				if len(existingMap) == 1 {
+					// Существующий компонент - это только $ref
+					// Проверяем, не ссылается ли он сам на себя
+					if refStr, ok := refVal.(string); ok {
+						expectedRef := "#/components/" + componentType + "/" + componentName
+						if refStr == expectedRef {
+							// Это самоссылка (Error: { $ref: '#/components/schemas/Error' })
+							// Заменяем на реальное содержимое в секции и в собранных компонентах
+							section[componentName] = componentCopy
+							r.components[componentType][componentName] = componentCopy
+							r.componentHashes[componentHash] = componentName
+							internalRef := "#/components/" + componentType + "/" + componentName
+							r.componentRefs[visitedKey] = internalRef
+							return internalRef, nil
+						}
+					}
+					// Это ссылка на другой компонент, заменяем на реальное содержимое
+					section[componentName] = componentCopy
+					r.components[componentType][componentName] = componentCopy
+					r.componentHashes[componentHash] = componentName
+					internalRef := "#/components/" + componentType + "/" + componentName
+					r.componentRefs[visitedKey] = internalRef
+					return internalRef, nil
+				}
+			}
+		}
+		
+		// Проверяем, не тот ли это же компонент
+		if r.componentsEqual(existingComponent, componentCopy) {
+			// Это тот же компонент, используем существующее имя
+			internalRef := "#/components/" + componentType + "/" + componentName
+			r.componentRefs[visitedKey] = internalRef
+			return internalRef, nil
+		}
+		
+		// Разные компоненты с одинаковым именем - используем уникальное имя
+		componentName = r.ensureUniqueComponentName(componentName, section, componentType)
+		
+		// Обновляем кэш, если имя изменилось из-за конфликта
+		if componentName != r.refToComponentName[originalRef] {
+			r.refToComponentName[originalRef] = componentName
+		}
+	} else {
+		// Компонент не существует в секции, проверяем уникальность имени
+		componentName = r.ensureUniqueComponentName(componentName, section, componentType)
+		
+		// Обновляем кэш, если имя изменилось из-за конфликта
+		if componentName != r.refToComponentName[originalRef] {
+			r.refToComponentName[originalRef] = componentName
+		}
+	}
+
 	// Добавляем компонент только если его еще нет
 	if _, exists := section[componentName]; !exists {
+		// Имя уникально, добавляем компонент
 		if _, existsInCollected := r.components[componentType][componentName]; !existsInCollected {
 			r.components[componentType][componentName] = componentCopy
 			r.componentHashes[componentHash] = componentName
 		}
 	} else {
-		// Компонент уже существует в секции - проверяем, не дубликат ли это
-		existingComponent := section[componentName]
-		if !r.componentsEqual(existingComponent, componentCopy) {
-			// Разные компоненты с одинаковым именем - используем уникальное имя
-			componentName = r.ensureUniqueComponentName(componentName, section, componentType)
-			r.components[componentType][componentName] = componentCopy
-			r.componentHashes[componentHash] = componentName
-		}
+		// Компонент уже существует в секции (после ensureUniqueComponentName)
+		// Это означает, что это другой компонент с уникальным именем
+		r.components[componentType][componentName] = componentCopy
+		r.componentHashes[componentHash] = componentName
 	}
 
 	internalRef := "#/components/" + componentType + "/" + componentName
@@ -684,6 +731,11 @@ func (r *ReferenceResolver) liftComponentRefs(ctx context.Context, data map[stri
 		// Выполняем "поднятие"
 		for name, refName := range toLift {
 			if targetComponent, exists := section[refName]; exists {
+				// Проверяем, не является ли это самоссылкой
+				if name == refName {
+					// Это самоссылка, не поднимаем
+					continue
+				}
 				// "Поднимаем" ссылку: заменяем на содержимое
 				targetCopy := r.deepCopy(targetComponent)
 				section[name] = targetCopy

@@ -1091,3 +1091,194 @@ components:
 		t.Error("RequestGuests should exist")
 	}
 }
+
+// TestReferenceResolver_NoDuplicateSchemas проверяет, что не создаются дубликаты схем
+// типа Error и Error1, когда Error уже существует как $ref
+func TestReferenceResolver_NoDuplicateSchemas(t *testing.T) {
+	tmpDir := t.TempDir()
+	schemasDir := filepath.Join(tmpDir, "schemas")
+	if err := os.MkdirAll(schemasDir, 0755); err != nil {
+		t.Fatalf("Failed to create schemas directory: %v", err)
+	}
+
+	// Создаём файл с компонентом Error
+	errorFile := filepath.Join(schemasDir, "Error.yaml")
+	errorContent := []byte(`type: object
+title: ErrorObject
+required:
+  - code
+  - message
+  - uuid
+properties:
+  code:
+    description: Код ошибки
+    type: string
+  message:
+    description: Краткое описание ошибки
+    type: string
+  uuid:
+    description: |
+      Уникальный идентификатор.  Генерируется рандомно.  Используется для трассировки ошибок
+    format: uuid
+    type: string
+`)
+	if err := os.WriteFile(errorFile, errorContent, 0644); err != nil {
+		t.Fatalf("Failed to create error file: %v", err)
+	}
+
+	loader := NewFileLoader()
+	parser := NewParser()
+	resolver := NewReferenceResolver(loader, parser)
+
+	// Создаём документ, где Error уже существует как $ref
+	data := map[string]interface{}{
+		"openapi": "3.0.0",
+		"paths": map[string]interface{}{
+			"/api/v1/dictionary/{dictionary_id}/counter": map[string]interface{}{
+				"post": map[string]interface{}{
+					"summary": "Увеличение счетчика использования адреса",
+					"responses": map[string]interface{}{
+						"404": map[string]interface{}{
+							"description": "Адрес не найден",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"$ref": "./schemas/Error.yaml",
+									},
+								},
+							},
+						},
+						"500": map[string]interface{}{
+							"description": "Внутренняя ошибка сервера",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"$ref": "./schemas/Error.yaml",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		"components": map[string]interface{}{
+			"schemas": map[string]interface{}{
+				"Error": map[string]interface{}{
+					"$ref": "#/components/schemas/Error",
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	config := domain.Config{MaxDepth: 10}
+
+	basePath := tmpDir
+	err := resolver.ResolveAll(ctx, data, basePath, config)
+	if err != nil {
+		t.Fatalf("ResolveAll() error = %v", err)
+	}
+
+	// Проверяем, что существует только одна схема Error
+	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
+	
+	// Должна быть только одна схема Error
+	errorCount := 0
+	error1Count := 0
+	for name := range schemas {
+		if name == "Error" {
+			errorCount++
+		}
+		if strings.HasPrefix(name, "Error") && len(name) > 5 {
+			// Проверяем, не является ли это Error1, Error2 и т.д.
+			rest := name[5:]
+			isNumber := true
+			for _, r := range rest {
+				if r < '0' || r > '9' {
+					isNumber = false
+					break
+				}
+			}
+			if isNumber {
+				error1Count++
+				t.Errorf("Found duplicate schema name: %s. Should not create Error1, Error2, etc.", name)
+			}
+		}
+	}
+	
+	if errorCount != 1 {
+		t.Errorf("Expected exactly one Error schema, found %d", errorCount)
+	}
+	
+	if error1Count > 0 {
+		t.Errorf("Found %d duplicate Error schemas (Error1, Error2, etc.). Should not create duplicates", error1Count)
+	}
+	
+	// Проверяем, что Error содержит реальное содержимое, а не только $ref
+	errorSchema, exists := schemas["Error"]
+	if !exists {
+		t.Fatal("Error schema should exist")
+	}
+	
+	errorMap, ok := errorSchema.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Error schema should be a map, got %T", errorSchema)
+	}
+	
+	// Проверяем, что это не только $ref
+	if _, hasRef := errorMap["$ref"]; hasRef {
+		if len(errorMap) == 1 {
+			t.Error("Error schema should contain actual content, not only $ref")
+		}
+	}
+	
+	// Проверяем, что содержимое правильное
+	if errorType, hasType := errorMap["type"]; !hasType || errorType != "object" {
+		t.Error("Error schema should have type: object")
+	}
+	
+	if title, hasTitle := errorMap["title"]; !hasTitle || title != "ErrorObject" {
+		t.Errorf("Error schema should have title: ErrorObject, got %v", title)
+	}
+	
+	// Проверяем, что все $ref указывают на правильное имя
+	paths := data["paths"].(map[string]interface{})
+	path := paths["/api/v1/dictionary/{dictionary_id}/counter"].(map[string]interface{})
+	post := path["post"].(map[string]interface{})
+	responses := post["responses"].(map[string]interface{})
+	
+	// Проверяем 404 response
+	response404 := responses["404"].(map[string]interface{})
+	content404 := response404["content"].(map[string]interface{})
+	appJson404 := content404["application/json"].(map[string]interface{})
+	schema404 := appJson404["schema"].(map[string]interface{})
+	ref404, hasRef404 := schema404["$ref"]
+	if !hasRef404 {
+		t.Error("schema in 404 response should contain $ref")
+	}
+	refStr404, ok := ref404.(string)
+	if !ok {
+		t.Fatalf("$ref should be a string, got %T", ref404)
+	}
+	if refStr404 != "#/components/schemas/Error" {
+		t.Errorf("$ref should be '#/components/schemas/Error', got '%s'", refStr404)
+	}
+	
+	// Проверяем 500 response
+	response500 := responses["500"].(map[string]interface{})
+	content500 := response500["content"].(map[string]interface{})
+	appJson500 := content500["application/json"].(map[string]interface{})
+	schema500 := appJson500["schema"].(map[string]interface{})
+	ref500, hasRef500 := schema500["$ref"]
+	if !hasRef500 {
+		t.Error("schema in 500 response should contain $ref")
+	}
+	refStr500, ok := ref500.(string)
+	if !ok {
+		t.Fatalf("$ref should be a string, got %T", ref500)
+	}
+	if refStr500 != "#/components/schemas/Error" {
+		t.Errorf("$ref should be '#/components/schemas/Error', got '%s'", refStr500)
+	}
+}
