@@ -54,6 +54,21 @@ func TestNormalizeComponentName(t *testing.T) {
 			input:    "---",
 			expected: "Component1",
 		},
+		{
+			name:     "real component names should be preserved",
+			input:    "RequestGuests",
+			expected: "RequestGuests",
+		},
+		{
+			name:     "real component names with mixed case",
+			input:    "ExistingGuest",
+			expected: "ExistingGuest",
+		},
+		{
+			name:     "real component names with underscores",
+			input:    "AnonimGuest",
+			expected: "AnonimGuest",
+		},
 	}
 
 	for _, tt := range tests {

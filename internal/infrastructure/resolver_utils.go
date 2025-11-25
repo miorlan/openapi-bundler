@@ -204,6 +204,7 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 		}
 		// Проверяем, что это реальное имя файла, а не просто точка или путь
 		if baseName != "" && baseName != "." && baseName != ".." {
+			// Используем имя файла как есть, только нормализуем специальные символы
 			return r.normalizeComponentName(baseName)
 		}
 	}
@@ -284,6 +285,7 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, section map[string]interface{}, componentType string) string {
 	name := preferredName
 	counter := 0
+	
 	for {
 		// Проверяем уникальность в финальной секции и в собранных компонентах
 		if _, exists := section[name]; !exists {
@@ -292,7 +294,14 @@ func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, sect
 			}
 		}
 		counter++
-		name = fmt.Sprintf("%s%d", preferredName, counter)
+		// Добавляем число к имени, сохраняя префикс Inline_ если он есть
+		if strings.HasPrefix(preferredName, "Inline_") {
+			baseName := strings.TrimPrefix(preferredName, "Inline_")
+			name = fmt.Sprintf("Inline_%s%d", baseName, counter)
+		} else {
+			// Для реальных имён (RequestGuests, ExistingGuest и т.д.) просто добавляем число
+			name = fmt.Sprintf("%s%d", preferredName, counter)
+		}
 	}
 }
 
