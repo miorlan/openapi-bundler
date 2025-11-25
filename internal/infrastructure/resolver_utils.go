@@ -106,15 +106,36 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 		return name
 	}
 	
+	// Убираем префиксы типа ".._.._schemas_" или "schemas_" из начала имени
+	// Это остатки от старой логики построения имён из путей
+	// Убираем все повторяющиеся префиксы ".._" или "../"
+	for strings.HasPrefix(name, ".._") {
+		name = strings.TrimPrefix(name, ".._")
+	}
+	for strings.HasPrefix(name, "../") {
+		name = strings.TrimPrefix(name, "../")
+	}
+	
+	// Убираем префиксы типа "schemas_", "responses_" и т.д.
+	for _, ct := range componentTypes {
+		prefix := ct + "_"
+		for strings.HasPrefix(name, prefix) {
+			name = strings.TrimPrefix(name, prefix)
+		}
+	}
+	
 	// Убираем специальные символы, оставляем только буквы, цифры и подчёркивания
 	var result strings.Builder
-	for _, r := range name {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
-			result.WriteRune(r)
-		} else if r == '-' || r == '.' || r == '/' || r == ' ' {
-			// Заменяем на подчёркивание
-			if result.Len() > 0 && result.String()[result.Len()-1] != '_' {
-				result.WriteRune('_')
+	for _, char := range name {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' {
+			result.WriteRune(char)
+		} else {
+			// Заменяем все остальные символы на подчёркивание, но не добавляем подряд
+			if result.Len() > 0 {
+				lastChar := result.String()[result.Len()-1]
+				if lastChar != '_' {
+					result.WriteRune('_')
+				}
 			}
 		}
 	}
@@ -135,11 +156,11 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 		return fmt.Sprintf("Component%d", r.componentCounter["schemas"])
 	}
 	
-	// Первый символ должен быть буквой
+	// Первый символ должен быть буквой (не цифрой и не подчёркиванием)
 	if len(normalized) > 0 {
 		first := normalized[0]
-		if first >= '0' && first <= '9' {
-			normalized = "C" + normalized
+		if (first >= '0' && first <= '9') || first == '_' {
+			normalized = "C" + strings.TrimPrefix(normalized, "_")
 		}
 	}
 	
