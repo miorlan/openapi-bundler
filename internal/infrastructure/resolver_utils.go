@@ -167,32 +167,72 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 	return normalized
 }
 
-func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentType string) string {
+// getPreferredComponentName определяет имя компонента по стратегии:
+// 1. Если $ref указывает на файл (./schemas/EmployeeFullInfo.yaml) → использовать имя файла
+// 2. Если $ref указывает на #/components/schemas/FooBar → использовать FooBar
+// 3. Если создаётся из inline-схемы с title → использовать title
+// 4. Иначе → Inline_<path>_...
+func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentType string, componentContent interface{}) string {
 	var name string
 	
-	// ВСЕГДА используем имя из фрагмента, если оно есть - НЕ строим из пути
+	// 1. Если есть фрагмент с компонентом (#/components/schemas/FooBar) → используем имя из фрагмента
 	if fragment != "" {
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
 		if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
 			// Используем оригинальное имя схемы из фрагмента
 			name = parts[2]
+			return r.normalizeComponentName(name)
 		} else if len(parts) >= 1 {
 			name = parts[len(parts)-1]
+			return r.normalizeComponentName(name)
 		}
 	}
 	
-	// Если имени нет, генерируем уникальное имя
-	if name == "" {
-		r.componentCounter[componentType]++
-		baseName := componentType[:len(componentType)-1]
-		if len(baseName) > 0 {
-			baseName = strings.ToUpper(baseName[:1]) + baseName[1:]
+	// 2. Если $ref указывает на файл → используем имя файла
+	refPath := strings.Split(ref, "#")[0]
+	if refPath != "" {
+		// Извлекаем имя файла без расширения
+		baseName := filepath.Base(refPath)
+		ext := filepath.Ext(baseName)
+		if ext != "" {
+			baseName = strings.TrimSuffix(baseName, ext)
 		}
-		name = fmt.Sprintf("%s%d", baseName, r.componentCounter[componentType])
+		if baseName != "" {
+			return r.normalizeComponentName(baseName)
+		}
 	}
 	
-	// Нормализуем имя
-	return r.normalizeComponentName(name)
+	// 3. Если это inline-схема с title → используем title
+	if componentContent != nil {
+		if schemaMap, ok := componentContent.(map[string]interface{}); ok {
+			if title, hasTitle := schemaMap["title"]; hasTitle {
+				if titleStr, ok := title.(string); ok && titleStr != "" {
+					return r.normalizeComponentName(titleStr)
+				}
+			}
+		}
+	}
+	
+	// 4. Генерируем имя на основе пути (Inline_<path>_...)
+	if refPath != "" {
+		// Создаём имя на основе пути к файлу
+		pathParts := strings.Split(strings.Trim(refPath, "./"), "/")
+		var pathName strings.Builder
+		pathName.WriteString("Inline")
+		for _, part := range pathParts {
+			if part != "" {
+				pathName.WriteString("_")
+				pathName.WriteString(strings.TrimSuffix(part, filepath.Ext(part)))
+			}
+		}
+		if pathName.Len() > len("Inline") {
+			return r.normalizeComponentName(pathName.String())
+		}
+	}
+	
+	// Последний резерв: генерируем имя
+	r.componentCounter[componentType]++
+	return fmt.Sprintf("Inline_%s%d", componentType[:len(componentType)-1], r.componentCounter[componentType])
 }
 
 func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, section map[string]interface{}, componentType string) string {

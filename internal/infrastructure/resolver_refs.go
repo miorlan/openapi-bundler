@@ -350,9 +350,22 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		}
 	}
 
-	// Получаем предпочтительное имя и нормализуем его
-	preferredName := r.getPreferredComponentName(ref, fragment, componentType)
-	preferredName = r.normalizeComponentName(preferredName)
+	// Проверяем кэш по $ref
+	originalRef := ref
+	if fragment != "" {
+		originalRef = ref + fragment
+	}
+	
+	var componentName string
+	if cachedName, exists := r.refToComponentName[originalRef]; exists {
+		// Используем имя из кэша
+		componentName = cachedName
+	} else {
+		// Вычисляем имя по новой стратегии
+		componentName = r.getPreferredComponentName(ref, fragment, componentType, componentContent)
+		// Сохраняем в кэш
+		r.refToComponentName[originalRef] = componentName
+	}
 	
 	components := r.rootDoc["components"].(map[string]interface{})
 	section, ok := components[componentType].(map[string]interface{})
@@ -410,11 +423,16 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		}
 	}
 
-	// Определяем имя компонента с проверкой уникальности
-	componentName := r.ensureUniqueComponentName(preferredName, section, componentType)
+	// Проверяем уникальность имени
+	componentName = r.ensureUniqueComponentName(componentName, section, componentType)
+	
+	// Обновляем кэш, если имя изменилось из-за конфликта
+	if componentName != r.refToComponentName[originalRef] {
+		r.refToComponentName[originalRef] = componentName
+	}
 	
 	// Проверяем, не создаём ли мы самоссылку
-	if componentName == preferredName && fragment != "" {
+	if fragment != "" {
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
 		if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
 			originalName := parts[2]

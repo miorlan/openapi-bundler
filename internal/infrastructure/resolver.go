@@ -21,6 +21,7 @@ type ReferenceResolver struct {
 	fileCache map[string]interface{}
 	componentHashes map[string]string
 	rootBasePath string
+	refToComponentName map[string]string // Кэш: исходный $ref -> имя компонента
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
@@ -40,6 +41,7 @@ func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) do
 		componentsBaseDir: make(map[string]string),
 		fileCache: make(map[string]interface{}),
 		componentHashes: make(map[string]string),
+		refToComponentName: make(map[string]string),
 	}
 }
 
@@ -51,6 +53,7 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 	r.componentsBaseDir = make(map[string]string)
 	r.fileCache = make(map[string]interface{})
 	r.componentHashes = make(map[string]string)
+	r.refToComponentName = make(map[string]string)
 	for _, ct := range componentTypes {
 		r.components[ct] = make(map[string]interface{})
 		r.componentCounter[ct] = 0
