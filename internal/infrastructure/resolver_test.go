@@ -1456,3 +1456,102 @@ properties:
 		t.Error("AnonimGuest schema should have type: object")
 	}
 }
+
+// TestReferenceResolver_NoDuplicateSchemas_ChangePasswordRequest проверяет конкретный случай
+// с ChangePasswordRequest, который создаёт дубликат ChangePasswordRequest1
+func TestReferenceResolver_NoDuplicateSchemas_ChangePasswordRequest(t *testing.T) {
+	tmpDir := t.TempDir()
+	schemasDir := filepath.Join(tmpDir, "schemas")
+	if err := os.MkdirAll(schemasDir, 0755); err != nil {
+		t.Fatalf("Failed to create schemas directory: %v", err)
+	}
+
+	// Создаём файл с компонентом ChangePasswordRequest
+	changePasswordRequestFile := filepath.Join(schemasDir, "ChangePasswordRequest.yaml")
+	changePasswordRequestContent := []byte(`type: object
+required:
+  - password
+properties:
+  password:
+    $ref: '#/components/schemas/Password'
+`)
+	if err := os.WriteFile(changePasswordRequestFile, changePasswordRequestContent, 0644); err != nil {
+		t.Fatalf("Failed to create changePasswordRequest file: %v", err)
+	}
+
+	loader := NewFileLoader()
+	parser := NewParser()
+	resolver := NewReferenceResolver(loader, parser)
+
+	// Создаём документ, где ChangePasswordRequest уже существует как $ref
+	data := map[string]interface{}{
+		"openapi": "3.0.0",
+		"paths": map[string]interface{}{
+			"/api/v1/profile/change-password": map[string]interface{}{
+				"post": map[string]interface{}{
+					"requestBody": map[string]interface{}{
+						"content": map[string]interface{}{
+							"application/json": map[string]interface{}{
+								"schema": map[string]interface{}{
+									"$ref": "./schemas/ChangePasswordRequest.yaml",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		"components": map[string]interface{}{
+			"schemas": map[string]interface{}{
+				"ChangePasswordRequest": map[string]interface{}{
+					"$ref": "#/components/schemas/ChangePasswordRequest",
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	config := domain.Config{MaxDepth: 10}
+
+	basePath := tmpDir
+	err := resolver.ResolveAll(ctx, data, basePath, config)
+	if err != nil {
+		t.Fatalf("ResolveAll() error = %v", err)
+	}
+
+	// Проверяем, что компонент имеет правильное имя
+	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
+
+	// Проверяем ChangePasswordRequest
+	if _, exists := schemas["ChangePasswordRequest"]; !exists {
+		t.Error("ChangePasswordRequest schema should exist with name 'ChangePasswordRequest'")
+	}
+
+	// Проверяем, что НЕТ дубликатов
+	for name := range schemas {
+		if strings.HasPrefix(name, "ChangePasswordRequest") && len(name) > 20 {
+			rest := name[20:]
+			isNumber := true
+			for _, r := range rest {
+				if r < '0' || r > '9' {
+					isNumber = false
+					break
+				}
+			}
+			if isNumber {
+				t.Errorf("Found duplicate schema name: %s. Should not create ChangePasswordRequest1, ChangePasswordRequest2, etc.", name)
+			}
+		}
+	}
+
+	// Проверяем, что компонент содержит реальное содержимое, а не только $ref
+	changePasswordRequest := schemas["ChangePasswordRequest"].(map[string]interface{})
+	if _, hasRef := changePasswordRequest["$ref"]; hasRef {
+		if len(changePasswordRequest) == 1 {
+			t.Error("ChangePasswordRequest schema should contain actual content, not only $ref")
+		}
+	}
+	if changePasswordRequest["type"] != "object" {
+		t.Error("ChangePasswordRequest schema should have type: object")
+	}
+}

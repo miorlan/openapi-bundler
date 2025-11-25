@@ -96,6 +96,35 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 				
 				// Проверяем дедупликацию по хешу
 				componentHash := r.hashComponent(component)
+				
+				// ВАЖНО: Проверяем, не существует ли компонент с таким же содержимым в section под другим именем
+				// Это нужно, чтобы заменить компоненты, которые являются только $ref
+				for existingName, existingComponent := range section {
+					if existingMap, ok := existingComponent.(map[string]interface{}); ok {
+						if refVal, hasRef := existingMap["$ref"]; hasRef {
+							if len(existingMap) == 1 {
+								// Существующий компонент - это только $ref
+								if refStr, ok := refVal.(string); ok {
+									expectedRef := "#/components/" + ct + "/" + existingName
+									if refStr == expectedRef {
+										// Это самоссылка, проверяем, не тот ли это же компонент по содержимому
+										if r.componentsEqual(component, existingComponent) || r.hashComponent(component) == r.hashComponent(existingComponent) {
+											// Заменяем на реальное содержимое
+											section[existingName] = component
+											r.componentHashes[componentHash] = existingName
+											// Удаляем компонент из r.components, если он был добавлен с другим именем
+											if name != existingName {
+												delete(r.components[ct], name)
+											}
+											goto nextComponent
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+				
 				if existingName, exists := r.componentHashes[componentHash]; exists {
 					if existingName != normalizedName {
 						// Компонент с таким же содержимым уже существует под другим именем
@@ -145,6 +174,7 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 					section[uniqueName] = component
 					r.componentHashes[componentHash] = uniqueName
 				}
+			nextComponent:
 			}
 		}
 	}

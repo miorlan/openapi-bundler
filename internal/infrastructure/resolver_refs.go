@@ -465,6 +465,20 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		}
 		// Также проверяем в финальной секции
 		if existingComponent, ok := section[existingName]; ok {
+			// Если существующий компонент является только $ref, заменяем его
+			if existingMap, ok := existingComponent.(map[string]interface{}); ok {
+				if _, hasRef := existingMap["$ref"]; hasRef {
+					if len(existingMap) == 1 {
+						// Существующий компонент - это только $ref, заменяем на реальное содержимое
+						section[existingName] = componentCopy
+						r.components[componentType][existingName] = componentCopy
+						r.componentHashes[componentHash] = existingName
+						internalRef := "#/components/" + componentType + "/" + existingName
+						r.componentRefs[visitedKey] = internalRef
+						return internalRef, nil
+					}
+				}
+			}
 			if r.componentsEqual(existingComponent, componentCopy) {
 				internalRef := "#/components/" + componentType + "/" + existingName
 				r.componentRefs[visitedKey] = internalRef
@@ -497,7 +511,8 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		}
 	}
 
-	// Проверяем, существует ли компонент с таким именем в секции
+	// ВАЖНО: Проверяем, существует ли компонент с таким именем в секции ПЕРЕД вызовом ensureUniqueComponentName
+	// Это нужно, чтобы заменить компоненты, которые являются только $ref
 	if existingComponent, exists := section[componentName]; exists {
 		// Компонент уже существует в секции
 		// Проверяем, не является ли существующий компонент только $ref
@@ -512,6 +527,13 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 							// Это самоссылка (Error: { $ref: '#/components/schemas/Error' })
 							// Заменяем на реальное содержимое в секции и в собранных компонентах
 							section[componentName] = componentCopy
+							// Удаляем компонент из r.components, если он был добавлен с другим именем
+							for name, comp := range r.components[componentType] {
+								if r.componentsEqual(comp, componentCopy) && name != componentName {
+									delete(r.components[componentType], name)
+									break
+								}
+							}
 							r.components[componentType][componentName] = componentCopy
 							r.componentHashes[componentHash] = componentName
 							internalRef := "#/components/" + componentType + "/" + componentName
@@ -521,6 +543,13 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 					}
 					// Это ссылка на другой компонент, заменяем на реальное содержимое
 					section[componentName] = componentCopy
+					// Удаляем компонент из r.components, если он был добавлен с другим именем
+					for name, comp := range r.components[componentType] {
+						if r.componentsEqual(comp, componentCopy) && name != componentName {
+							delete(r.components[componentType], name)
+							break
+						}
+					}
 					r.components[componentType][componentName] = componentCopy
 					r.componentHashes[componentHash] = componentName
 					internalRef := "#/components/" + componentType + "/" + componentName
@@ -539,6 +568,7 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		}
 		
 		// Разные компоненты с одинаковым именем - используем уникальное имя
+		// НО только если существующий компонент НЕ является только $ref
 		componentName = r.ensureUniqueComponentName(componentName, section, componentType)
 		
 		// Обновляем кэш, если имя изменилось из-за конфликта
