@@ -555,16 +555,8 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 		}
 	}
 
-	// Добавляем компонент только если его еще нет
-	if _, exists := section[componentName]; !exists {
-		// Имя уникально, добавляем компонент
-		if _, existsInCollected := r.components[componentType][componentName]; !existsInCollected {
-			r.components[componentType][componentName] = componentCopy
-			r.componentHashes[componentHash] = componentName
-		}
-	} else {
-		// Компонент уже существует в секции (после ensureUniqueComponentName)
-		// Это означает, что это другой компонент с уникальным именем
+	// Добавляем компонент в r.components только если его еще нет
+	if _, existsInCollected := r.components[componentType][componentName]; !existsInCollected {
 		r.components[componentType][componentName] = componentCopy
 		r.componentHashes[componentHash] = componentName
 	}

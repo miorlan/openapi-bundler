@@ -1282,3 +1282,177 @@ properties:
 		t.Errorf("$ref should be '#/components/schemas/Error', got '%s'", refStr500)
 	}
 }
+
+// TestReferenceResolver_NoDuplicateSchemas_Multiple проверяет, что не создаются дубликаты
+// для нескольких компонентов одновременно (AdditionalInfoItem, AnonimGuest)
+func TestReferenceResolver_NoDuplicateSchemas_Multiple(t *testing.T) {
+	tmpDir := t.TempDir()
+	schemasDir := filepath.Join(tmpDir, "schemas")
+	if err := os.MkdirAll(schemasDir, 0755); err != nil {
+		t.Fatalf("Failed to create schemas directory: %v", err)
+	}
+
+	// Создаём файл с компонентом AdditionalInfoItem
+	additionalInfoItemFile := filepath.Join(schemasDir, "AdditionalInfoItem.yaml")
+	additionalInfoItemContent := []byte(`type: object
+required:
+  - id
+  - value
+properties:
+  description:
+    description: Текстовое описание атрибута заявки (как на фронте)
+    example: Предпочтительный тип авто
+    type: string
+  id:
+    description: ID типа атрибута заявки (1 - Предпочтительный тип авто, 2 - Особые требования, 3 - Комментарий для Протокольной службы)
+    example: 1
+    type: integer
+  value:
+    description: ID типа атрибута заявки ()
+    example: Чёрный бумер, тонировка
+    type: string
+`)
+	if err := os.WriteFile(additionalInfoItemFile, additionalInfoItemContent, 0644); err != nil {
+		t.Fatalf("Failed to create additionalInfoItem file: %v", err)
+	}
+
+	// Создаём файл с компонентом AnonimGuest
+	anonimGuestFile := filepath.Join(schemasDir, "AnonimGuest.yaml")
+	anonimGuestContent := []byte(`type: object
+description: Гость не существовал в каталоге, пользователя добавим в заявку как анонимного
+required:
+  - name
+  - contacts
+properties:
+  contacts:
+    description: Контактные данные Гостя. Массив значений с указанны типом данных
+    items:
+      $ref: '#/components/schemas/GuestContact'
+    minItems: 0
+    type: array
+  name:
+    example: Иванов Иван
+    type: string
+`)
+	if err := os.WriteFile(anonimGuestFile, anonimGuestContent, 0644); err != nil {
+		t.Fatalf("Failed to create anonimGuest file: %v", err)
+	}
+
+	loader := NewFileLoader()
+	parser := NewParser()
+	resolver := NewReferenceResolver(loader, parser)
+
+	// Создаём документ, где компоненты уже существуют как $ref
+	data := map[string]interface{}{
+		"openapi": "3.0.0",
+		"paths": map[string]interface{}{
+			"/api/v1/test": map[string]interface{}{
+				"post": map[string]interface{}{
+					"requestBody": map[string]interface{}{
+						"content": map[string]interface{}{
+							"application/json": map[string]interface{}{
+								"schema": map[string]interface{}{
+									"$ref": "./schemas/AdditionalInfoItem.yaml",
+								},
+							},
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"$ref": "./schemas/AnonimGuest.yaml",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		"components": map[string]interface{}{
+			"schemas": map[string]interface{}{
+				"AdditionalInfoItem": map[string]interface{}{
+					"$ref": "#/components/schemas/AdditionalInfoItem",
+				},
+				"AnonimGuest": map[string]interface{}{
+					"$ref": "#/components/schemas/AnonimGuest",
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	config := domain.Config{MaxDepth: 10}
+
+	basePath := tmpDir
+	err := resolver.ResolveAll(ctx, data, basePath, config)
+	if err != nil {
+		t.Fatalf("ResolveAll() error = %v", err)
+	}
+
+	// Проверяем, что компоненты имеют правильные имена
+	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
+
+	// Проверяем AdditionalInfoItem
+	if _, exists := schemas["AdditionalInfoItem"]; !exists {
+		t.Error("AdditionalInfoItem schema should exist with name 'AdditionalInfoItem'")
+	}
+
+	// Проверяем AnonimGuest
+	if _, exists := schemas["AnonimGuest"]; !exists {
+		t.Error("AnonimGuest schema should exist with name 'AnonimGuest'")
+	}
+
+	// Проверяем, что НЕТ дубликатов
+	for name := range schemas {
+		if strings.HasPrefix(name, "AdditionalInfoItem") && len(name) > 18 {
+			rest := name[18:]
+			isNumber := true
+			for _, r := range rest {
+				if r < '0' || r > '9' {
+					isNumber = false
+					break
+				}
+			}
+			if isNumber {
+				t.Errorf("Found duplicate schema name: %s. Should not create AdditionalInfoItem1, AdditionalInfoItem2, etc.", name)
+			}
+		}
+		if strings.HasPrefix(name, "AnonimGuest") && len(name) > 11 {
+			rest := name[11:]
+			isNumber := true
+			for _, r := range rest {
+				if r < '0' || r > '9' {
+					isNumber = false
+					break
+				}
+			}
+			if isNumber {
+				t.Errorf("Found duplicate schema name: %s. Should not create AnonimGuest1, AnonimGuest2, etc.", name)
+			}
+		}
+	}
+
+	// Проверяем, что компоненты содержат реальное содержимое, а не только $ref
+	additionalInfoItem := schemas["AdditionalInfoItem"].(map[string]interface{})
+	if _, hasRef := additionalInfoItem["$ref"]; hasRef {
+		if len(additionalInfoItem) == 1 {
+			t.Error("AdditionalInfoItem schema should contain actual content, not only $ref")
+		}
+	}
+	if additionalInfoItem["type"] != "object" {
+		t.Error("AdditionalInfoItem schema should have type: object")
+	}
+
+	anonimGuest := schemas["AnonimGuest"].(map[string]interface{})
+	if _, hasRef := anonimGuest["$ref"]; hasRef {
+		if len(anonimGuest) == 1 {
+			t.Error("AnonimGuest schema should contain actual content, not only $ref")
+		}
+	}
+	if anonimGuest["type"] != "object" {
+		t.Error("AnonimGuest schema should have type: object")
+	}
+}
