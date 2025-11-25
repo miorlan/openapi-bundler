@@ -47,6 +47,38 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 							// Это уже внутренняя ссылка на параметр - не обрабатываем дальше
 							continue
 						}
+					} else {
+						// Параметр развернут (без $ref) - извлекаем в компоненты
+						// Определяем имя параметра
+						paramName := ""
+						if nameVal, hasName := paramMap["name"]; hasName {
+							if nameStr, ok := nameVal.(string); ok {
+								paramName = r.normalizeComponentName(nameStr)
+							}
+						}
+						if paramName == "" {
+							paramName = "Parameter"
+						}
+						
+						componentHash := r.hashComponent(paramMap)
+						
+						// Проверяем, не существует ли уже компонент с таким же содержимым
+						if existingName, exists := r.componentHashes[componentHash]; exists {
+							// Используем существующее имя
+							paramsArray[i] = map[string]interface{}{
+								"$ref": "#/components/parameters/" + existingName,
+							}
+						} else {
+							// Создаём новый компонент
+							paramName = r.ensureUniqueComponentName(paramName, r.components["parameters"], "parameters")
+							r.components["parameters"][paramName] = r.deepCopy(paramMap)
+							r.componentHashes[componentHash] = paramName
+							r.componentUsageCount[componentHash]++
+							// Заменяем параметр на $ref
+							paramsArray[i] = map[string]interface{}{
+								"$ref": "#/components/parameters/" + paramName,
+							}
+						}
 					}
 				}
 			}
@@ -194,42 +226,43 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				}
 			}
 
-			// Обрабатываем schema в content как обычно - все схемы создают компоненты
+			// Обрабатываем schema в content - все схемы создают компоненты
 			if k == "schema" && inContentContext {
 				if schemaMap, ok := v.(map[string]interface{}); ok {
-					// Обрабатываем schema в content - все схемы создают компоненты
+					// Сначала обрабатываем вложенные ссылки
 					if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, false, false); err != nil {
 						return fmt.Errorf("failed to process schema: %w", err)
+					}
+					// Если схема не содержит $ref (inline схема), извлекаем её в компоненты
+					if _, hasRef := schemaMap["$ref"]; !hasRef {
+						// Извлекаем inline схему в компоненты
+						componentName := r.getPreferredComponentName("", "", "schemas", schemaMap)
+						componentHash := r.hashComponent(schemaMap)
+						
+						// Проверяем, не существует ли уже компонент с таким же содержимым
+						if existingName, exists := r.componentHashes[componentHash]; exists {
+							// Используем существующее имя
+							n[k] = map[string]interface{}{
+								"$ref": "#/components/schemas/" + existingName,
+							}
+						} else {
+							// Создаём новый компонент
+							componentName = r.ensureUniqueComponentName(componentName, r.components["schemas"], "schemas")
+							r.components["schemas"][componentName] = r.deepCopy(schemaMap)
+							r.componentHashes[componentHash] = componentName
+							r.componentUsageCount[componentHash]++
+							// Заменяем схему на $ref
+							n[k] = map[string]interface{}{
+								"$ref": "#/components/schemas/" + componentName,
+							}
+						}
 					}
 					continue
 				}
 			}
 
-			// Параметры обрабатываем рекурсивно, если они еще не обработаны
+			// Параметры уже обработаны выше, пропускаем
 			if k == "parameters" {
-				if paramsArray, ok := v.([]interface{}); ok {
-					for i, param := range paramsArray {
-						if paramMap, ok := param.(map[string]interface{}); ok {
-							if refVal, hasRef := paramMap["$ref"]; hasRef {
-								if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
-									// Это внешняя ссылка на параметр
-									// Создаём компонент в components.parameters, но оставляем $ref в массиве
-									internalRef, err := r.resolveAndReplaceExternalRefWithType(ctx, refStr, baseDir, config, depth, "parameters", false)
-									if err == nil && internalRef != "" {
-										// Заменяем элемент массива на только $ref
-										paramsArray[i] = map[string]interface{}{
-											"$ref": internalRef,
-										}
-										continue
-									}
-								} else if refStr, ok := refVal.(string); ok && strings.HasPrefix(refStr, "#/components/parameters/") {
-									// Это уже внутренняя ссылка на параметр - не обрабатываем дальше
-									continue
-								}
-							}
-						}
-					}
-				}
 				continue
 			}
 
