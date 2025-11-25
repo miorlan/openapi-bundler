@@ -105,22 +105,11 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				return &domain.ErrInvalidReference{Ref: fmt.Sprintf("%v", refVal)}
 			}
 
-			if strings.HasPrefix(refStr, "#") {
-				return nil
-			}
-
 			// Если мы в контексте schema внутри content, не извлекаем схемы в components
 			// Внешние $ref должны быть разрешены и заменены на полное содержимое inline
 			if inSchemaContext && inContentContext {
-				refParts := strings.SplitN(refStr, "#", 2)
-				refPath := refParts[0]
-				if refPath != "" {
-					// Это внешний $ref в schema внутри content - разрешаем его и заменяем на содержимое inline
-					// НЕ извлекаем в components
-					if strings.HasPrefix(refStr, "#") {
-						// Внутренняя ссылка - не обрабатываем здесь
-						return nil
-					}
+				// Проверяем, является ли это внешним $ref
+				if !strings.HasPrefix(refStr, "#") {
 					// Внешний $ref - загружаем содержимое и заменяем $ref на полное содержимое
 					expanded, err := r.expandExternalRefInline(ctx, refStr, baseDir, config, depth)
 					if err == nil && expanded != nil {
@@ -136,7 +125,14 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 						return nil
 					}
 					// Если не удалось разрешить, продолжаем обычную обработку
+				} else {
+					// Внутренняя ссылка в schema внутри content - обрабатываем, но не извлекаем
+					return nil
 				}
+			}
+
+			if strings.HasPrefix(refStr, "#") {
+				return nil
 			}
 
 			refParts := strings.SplitN(refStr, "#", 2)
@@ -151,8 +147,11 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 			}
 
 			if fragment != "" && strings.HasPrefix(fragment, "#/components/") {
-				skipExtraction := inSchemaContext && inContentContext
-				internalRef, err := r.resolveAndReplaceExternalRefWithContext(ctx, refStr, baseDir, config, depth, skipExtraction)
+				// Если мы в контексте schema внутри content, не обрабатываем через обычный путь
+				if inSchemaContext && inContentContext {
+					return nil
+				}
+				internalRef, err := r.resolveAndReplaceExternalRefWithContext(ctx, refStr, baseDir, config, depth, false)
 				if err != nil {
 					return fmt.Errorf("failed to replace external ref %s: %w", refStr, err)
 				}
@@ -164,8 +163,13 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				return nil
 			}
 
-			skipExtraction := inSchemaContext && inContentContext
-			internalRef, err := r.resolveAndReplaceExternalRefWithContext(ctx, refStr, baseDir, config, depth, skipExtraction)
+			// Если мы в контексте schema внутри content, не обрабатываем через обычный путь
+			// (уже обработано выше через expandExternalRefInline)
+			if inSchemaContext && inContentContext {
+				return nil
+			}
+
+			internalRef, err := r.resolveAndReplaceExternalRefWithContext(ctx, refStr, baseDir, config, depth, false)
 			if err == nil && internalRef != "" {
 				n["$ref"] = internalRef
 				return nil
@@ -203,6 +207,27 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 			// Inline схемы должны оставаться inline, а не извлекаться в components
 			if k == "schema" && inContentContext {
 				if schemaMap, ok := v.(map[string]interface{}); ok {
+					// Проверяем, есть ли внешний $ref в schema
+					if refVal, hasRef := schemaMap["$ref"]; hasRef {
+						if refStr, ok := refVal.(string); ok {
+							// Если это внешний $ref, заменяем на inline содержимое
+							if !strings.HasPrefix(refStr, "#") {
+								expanded, err := r.expandExternalRefInline(ctx, refStr, baseDir, config, depth)
+								if err == nil && expanded != nil {
+									// Заменяем $ref на полное содержимое
+									for k, v := range expanded {
+										schemaMap[k] = v
+									}
+									delete(schemaMap, "$ref")
+									// Обрабатываем вложенные ссылки в развернутом содержимом
+									if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, true, true); err != nil {
+										return fmt.Errorf("failed to process expanded schema: %w", err)
+									}
+									continue
+								}
+							}
+						}
+					}
 					// Обрабатываем schema в content с флагом, что мы в контексте schema
 					// Это предотвратит извлечение inline схем в components
 					if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, true, true); err != nil {
@@ -522,12 +547,20 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 	visitedKey := refPath + fragment
 	if r.visited[visitedKey] {
 		if internalRef, ok := r.componentRefs[visitedKey]; ok {
+			// Если skipExtraction = true, не возвращаем internalRef, чтобы не создавать компонент
+			if skipExtraction {
+				return "", nil
+			}
 			return internalRef, nil
 		}
 		return "", &domain.ErrCircularReference{Path: visitedKey}
 	}
-	r.visited[visitedKey] = true
-	defer delete(r.visited, visitedKey)
+	
+	// Если skipExtraction = true, не помечаем как посещенный, чтобы не создавать компонент
+	if !skipExtraction {
+		r.visited[visitedKey] = true
+		defer delete(r.visited, visitedKey)
+	}
 
 	content, err := r.loadAndParseRefFile(ctx, refPath, config)
 	if err != nil {
@@ -940,6 +973,7 @@ func (r *ReferenceResolver) expandPathRef(ctx context.Context, ref string, baseD
 
 // expandExternalRefInline загружает содержимое внешнего $ref и возвращает его для inline-замены
 // НЕ создает компонент в components
+// ВАЖНО: Не использует кэш componentRefs, чтобы избежать создания компонента
 func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (map[string]interface{}, error) {
 	refParts := strings.SplitN(ref, "#", 2)
 	refPath := refParts[0]
@@ -960,6 +994,10 @@ func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref str
 	if !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
 		refPath = filepath.Clean(refPath)
 	}
+
+	// ВАЖНО: Не проверяем visitedKey и componentRefs, чтобы избежать использования кэша
+	// и создания компонента. Мы хотим только загрузить содержимое для inline-замены.
+	// Также не помечаем visitedKey как посещенный, чтобы не создавать компонент через другой путь.
 
 	content, err := r.loadAndParseRefFile(ctx, refPath, config)
 	if err != nil {
