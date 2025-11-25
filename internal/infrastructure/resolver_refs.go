@@ -174,6 +174,50 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 									// Это уже внутренняя ссылка на параметр - не обрабатываем дальше
 									continue
 								}
+							} else {
+								// Параметр уже развернут (не содержит $ref)
+								// Проверяем, не совпадает ли он с каким-либо компонентом в components.parameters
+								// Если да, заменяем на $ref
+								if components, ok := r.rootDoc["components"].(map[string]interface{}); ok {
+									if paramsSection, ok := components["parameters"].(map[string]interface{}); ok {
+										paramHash := r.hashComponent(paramMap)
+										for paramName, paramComponent := range paramsSection {
+											if paramCompMap, ok := paramComponent.(map[string]interface{}); ok {
+												// Пропускаем компоненты, которые являются только $ref
+												if _, hasRef := paramCompMap["$ref"]; hasRef && len(paramCompMap) == 1 {
+													continue
+												}
+												if r.componentsEqual(paramMap, paramCompMap) || r.hashComponent(paramCompMap) == paramHash {
+													// Найден совпадающий компонент - заменяем на $ref
+													paramsArray[i] = map[string]interface{}{
+														"$ref": "#/components/parameters/" + paramName,
+													}
+													goto nextParam
+												}
+											}
+										}
+									}
+								}
+								// Также проверяем в r.components (еще не добавленных в rootDoc)
+								if paramsSection, ok := r.components["parameters"]; ok {
+									paramHash := r.hashComponent(paramMap)
+									for paramName, paramComponent := range paramsSection {
+										if paramCompMap, ok := paramComponent.(map[string]interface{}); ok {
+											// Пропускаем компоненты, которые являются только $ref
+											if _, hasRef := paramCompMap["$ref"]; hasRef && len(paramCompMap) == 1 {
+												continue
+											}
+											if r.componentsEqual(paramMap, paramCompMap) || r.hashComponent(paramCompMap) == paramHash {
+												// Найден совпадающий компонент - заменяем на $ref
+												normalizedName := r.normalizeComponentName(paramName)
+												paramsArray[i] = map[string]interface{}{
+													"$ref": "#/components/parameters/" + normalizedName,
+												}
+												goto nextParam
+											}
+										}
+									}
+								}
 							}
 							// Если элемент содержит только $ref (внутреннюю), не обрабатываем рекурсивно
 							if len(paramMap) == 1 {
@@ -182,9 +226,61 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 								}
 							}
 						}
+					nextParam:
 						// Для параметров без внешней ссылки обрабатываем рекурсивно (внутренние ссылки)
-						if err := r.replaceExternalRefs(ctx, param, baseDir, config, depth); err != nil {
-							return fmt.Errorf("failed to process parameter %d: %w", i, err)
+						// НО только если параметр не был заменен на $ref
+						if paramMap, ok := paramsArray[i].(map[string]interface{}); ok {
+							if _, hasRef := paramMap["$ref"]; !hasRef {
+								if err := r.replaceExternalRefs(ctx, paramsArray[i], baseDir, config, depth); err != nil {
+									return fmt.Errorf("failed to process parameter %d: %w", i, err)
+								}
+								// После обработки проверяем, не совпадает ли параметр с компонентом
+								// Если да, заменяем на $ref
+								if updatedParamMap, ok := paramsArray[i].(map[string]interface{}); ok {
+									if _, hasRef := updatedParamMap["$ref"]; !hasRef {
+										// Параметр все еще развернут - проверяем совпадение с компонентами
+										paramHash := r.hashComponent(updatedParamMap)
+										if components, ok := r.rootDoc["components"].(map[string]interface{}); ok {
+											if paramsSection, ok := components["parameters"].(map[string]interface{}); ok {
+												for paramName, paramComponent := range paramsSection {
+													if paramCompMap, ok := paramComponent.(map[string]interface{}); ok {
+														// Пропускаем компоненты, которые являются только $ref
+														if _, hasRef := paramCompMap["$ref"]; hasRef && len(paramCompMap) == 1 {
+															continue
+														}
+														if r.componentsEqual(updatedParamMap, paramCompMap) || r.hashComponent(paramCompMap) == paramHash {
+															// Найден совпадающий компонент - заменяем на $ref
+															paramsArray[i] = map[string]interface{}{
+																"$ref": "#/components/parameters/" + paramName,
+															}
+															break
+														}
+													}
+												}
+											}
+										}
+										// Также проверяем в r.components
+										if paramsSection, ok := r.components["parameters"]; ok {
+											for paramName, paramComponent := range paramsSection {
+												if paramCompMap, ok := paramComponent.(map[string]interface{}); ok {
+													// Пропускаем компоненты, которые являются только $ref
+													if _, hasRef := paramCompMap["$ref"]; hasRef && len(paramCompMap) == 1 {
+														continue
+													}
+													if r.componentsEqual(updatedParamMap, paramCompMap) || r.hashComponent(paramCompMap) == paramHash {
+														// Найден совпадающий компонент - заменяем на $ref
+														normalizedName := r.normalizeComponentName(paramName)
+														paramsArray[i] = map[string]interface{}{
+															"$ref": "#/components/parameters/" + normalizedName,
+														}
+														break
+													}
+												}
+											}
+										}
+									}
+								}
+							}
 						}
 					}
 					continue
