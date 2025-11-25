@@ -8,7 +8,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type Parser struct{}
+type Parser struct {
+	originalRootNode *yaml.Node
+}
 
 func NewParser() domain.Parser {
 	return &Parser{}
@@ -19,7 +21,18 @@ func (p *Parser) Unmarshal(data []byte, v interface{}, format domain.FileFormat)
 	case domain.FormatJSON:
 		return json.Unmarshal(data, v)
 	case domain.FormatYAML:
-		return yaml.Unmarshal(data, v)
+		var node yaml.Node
+		if err := yaml.Unmarshal(data, &node); err != nil {
+			return err
+		}
+		if p.originalRootNode == nil {
+			if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+				p.originalRootNode = node.Content[0]
+			} else {
+				p.originalRootNode = &node
+			}
+		}
+		return node.Decode(v)
 	default:
 		return p.unmarshalByContent(data, v)
 	}
@@ -30,28 +43,140 @@ func (p *Parser) Marshal(v interface{}, format domain.FileFormat) ([]byte, error
 	case domain.FormatJSON:
 		return json.MarshalIndent(v, "", "  ")
 	case domain.FormatYAML:
-		// Переупорядочиваем ключи для сохранения стандартного порядка OpenAPI
-		if ordered, ok := p.reorderOpenAPIFields(v); ok {
-			return yaml.Marshal(ordered)
-		}
-		return yaml.Marshal(v)
+		fallthrough
 	default:
-		// Переупорядочиваем ключи для сохранения стандартного порядка OpenAPI
-		if ordered, ok := p.reorderOpenAPIFields(v); ok {
-			return yaml.Marshal(ordered)
-		}
-		return yaml.Marshal(v)
+		result, err := p.marshalYAMLWithOrder(v)
+		p.originalRootNode = nil
+		return result, err
 	}
 }
 
-// reorderOpenAPIFields переупорядочивает ключи в map согласно стандартному порядку OpenAPI
-func (p *Parser) reorderOpenAPIFields(v interface{}) (interface{}, bool) {
-	data, ok := v.(map[string]interface{})
-	if !ok {
-		return v, false
+func (p *Parser) marshalYAMLWithOrder(v interface{}) ([]byte, error) {
+	var node yaml.Node
+	if err := node.Encode(v); err != nil {
+		return nil, err
 	}
 
-	// Стандартный порядок полей OpenAPI
+	if p.originalRootNode != nil {
+		p.preserveOriginalOrder(&node, p.originalRootNode)
+	} else {
+		p.reorderYAMLNode(&node)
+	}
+
+	var buf strings.Builder
+	encoder := yaml.NewEncoder(&buf)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&node); err != nil {
+		return nil, err
+	}
+	encoder.Close()
+
+	return []byte(buf.String()), nil
+}
+
+func (p *Parser) createKeyNode(key string) *yaml.Node {
+	return &yaml.Node{
+		Kind:  yaml.ScalarNode,
+		Value: key,
+	}
+}
+
+func (p *Parser) buildNodeMap(node *yaml.Node) map[string]*yaml.Node {
+	nodeMap := make(map[string]*yaml.Node)
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nodeMap
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		if i+1 >= len(node.Content) {
+			break
+		}
+		keyNode := node.Content[i]
+		valueNode := node.Content[i+1]
+		nodeMap[keyNode.Value] = valueNode
+	}
+	return nodeMap
+}
+
+func (p *Parser) preserveOriginalOrder(node *yaml.Node, originalNode *yaml.Node) {
+	if node == nil || originalNode == nil || node.Kind != yaml.MappingNode || originalNode.Kind != yaml.MappingNode {
+		p.reorderYAMLNode(node)
+		return
+	}
+
+	nodeMap := p.buildNodeMap(node)
+	newContent := make([]*yaml.Node, 0)
+	processed := make(map[string]bool)
+
+	for i := 0; i < len(originalNode.Content); i += 2 {
+		if i+1 >= len(originalNode.Content) {
+			break
+		}
+		originalKeyNode := originalNode.Content[i]
+		originalValueNode := originalNode.Content[i+1]
+		key := originalKeyNode.Value
+
+		if valueNode, exists := nodeMap[key]; exists {
+			newContent = append(newContent, p.createKeyNode(key), valueNode)
+			processed[key] = true
+
+			if key == "components" && originalValueNode.Kind == yaml.MappingNode {
+				p.preserveComponentsOrder(valueNode, originalValueNode)
+			} else {
+				p.preserveOriginalOrder(valueNode, originalValueNode)
+			}
+		}
+	}
+
+	for key, valueNode := range nodeMap {
+		if !processed[key] {
+			newContent = append(newContent, p.createKeyNode(key), valueNode)
+			p.reorderYAMLNode(valueNode)
+		}
+	}
+
+	node.Content = newContent
+}
+
+func (p *Parser) preserveComponentsOrder(node *yaml.Node, originalNode *yaml.Node) {
+	if node == nil || originalNode == nil || node.Kind != yaml.MappingNode || originalNode.Kind != yaml.MappingNode {
+		p.reorderComponentsYAMLNode(node)
+		return
+	}
+
+	nodeMap := p.buildNodeMap(node)
+	newContent := make([]*yaml.Node, 0)
+	processed := make(map[string]bool)
+
+	for i := 0; i < len(originalNode.Content); i += 2 {
+		if i+1 >= len(originalNode.Content) {
+			break
+		}
+		originalKeyNode := originalNode.Content[i]
+		originalValueNode := originalNode.Content[i+1]
+		key := originalKeyNode.Value
+
+		if valueNode, exists := nodeMap[key]; exists {
+			newContent = append(newContent, p.createKeyNode(key), valueNode)
+			processed[key] = true
+			p.preserveOriginalOrder(valueNode, originalValueNode)
+		}
+	}
+
+	for key, valueNode := range nodeMap {
+		if !processed[key] {
+			newContent = append(newContent, p.createKeyNode(key), valueNode)
+			p.reorderYAMLNode(valueNode)
+		}
+	}
+
+	node.Content = newContent
+}
+
+func (p *Parser) reorderYAMLNode(node *yaml.Node) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
+	}
+
 	fieldOrder := []string{
 		"openapi",
 		"info",
@@ -62,76 +187,58 @@ func (p *Parser) reorderOpenAPIFields(v interface{}) (interface{}, bool) {
 		"components",
 		"security",
 		"webhooks",
-		"x-", // x-* поля в конце
 	}
 
-	ordered := make(map[string]interface{})
+	nodeMap := make(map[string]*yaml.Node)
+	xFields := make([]*yaml.Node, 0)
+
+	for i := 0; i < len(node.Content); i += 2 {
+		if i+1 >= len(node.Content) {
+			break
+		}
+		keyNode := node.Content[i]
+		valueNode := node.Content[i+1]
+		key := keyNode.Value
+		if strings.HasPrefix(key, "x-") {
+			xFields = append(xFields, keyNode, valueNode)
+		} else {
+			nodeMap[key] = valueNode
+		}
+	}
+
+	newContent := make([]*yaml.Node, 0)
 	processed := make(map[string]bool)
 
-	// Сначала добавляем поля в стандартном порядке
 	for _, key := range fieldOrder {
-		if key == "x-" {
-			// Добавляем все x-* поля
-			for k, val := range data {
-				if strings.HasPrefix(k, "x-") && !processed[k] {
-					ordered[k] = p.reorderNestedFields(val)
-					processed[k] = true
-				}
-			}
-		} else {
-			if val, exists := data[key]; exists {
-				ordered[key] = p.reorderNestedFields(val)
-				processed[key] = true
+		if valueNode, exists := nodeMap[key]; exists {
+			newContent = append(newContent, p.createKeyNode(key), valueNode)
+			processed[key] = true
+
+			if key == "components" {
+				p.reorderComponentsYAMLNode(valueNode)
+			} else {
+				p.reorderYAMLNode(valueNode)
 			}
 		}
 	}
 
-	// Затем добавляем остальные поля, которых нет в стандартном порядке
-	for k, val := range data {
-		if !processed[k] {
-			ordered[k] = p.reorderNestedFields(val)
+	newContent = append(newContent, xFields...)
+
+	for key, valueNode := range nodeMap {
+		if !processed[key] {
+			newContent = append(newContent, p.createKeyNode(key), valueNode)
+			p.reorderYAMLNode(valueNode)
 		}
 	}
 
-	return ordered, true
+	node.Content = newContent
 }
 
-// reorderNestedFields рекурсивно переупорядочивает вложенные структуры
-func (p *Parser) reorderNestedFields(v interface{}) interface{} {
-	switch val := v.(type) {
-	case map[string]interface{}:
-		// Если это components, переупорядочиваем секции компонентов
-		if len(val) > 0 {
-			// Проверяем, не является ли это components
-			_, hasSchemas := val["schemas"]
-			_, hasResponses := val["responses"]
-			_, hasParameters := val["parameters"]
-			if hasSchemas || hasResponses || hasParameters {
-				// Это components - переупорядочиваем секции
-				return p.reorderComponentsFields(val)
-			}
-		}
-		// Для других map рекурсивно обрабатываем значения
-		result := make(map[string]interface{})
-		for k, v := range val {
-			result[k] = p.reorderNestedFields(v)
-		}
-		return result
-	case []interface{}:
-		// Для массивов рекурсивно обрабатываем элементы
-		result := make([]interface{}, len(val))
-		for i, item := range val {
-			result[i] = p.reorderNestedFields(item)
-		}
-		return result
-	default:
-		return v
+func (p *Parser) reorderComponentsYAMLNode(node *yaml.Node) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
 	}
-}
 
-// reorderComponentsFields переупорядочивает секции в components согласно стандартному порядку
-func (p *Parser) reorderComponentsFields(data map[string]interface{}) map[string]interface{} {
-	// Стандартный порядок секций components
 	componentOrder := []string{
 		"schemas",
 		"responses",
@@ -144,25 +251,27 @@ func (p *Parser) reorderComponentsFields(data map[string]interface{}) map[string
 		"callbacks",
 	}
 
-	ordered := make(map[string]interface{})
+	nodeMap := p.buildNodeMap(node)
+
+	newContent := make([]*yaml.Node, 0)
 	processed := make(map[string]bool)
 
-	// Сначала добавляем секции в стандартном порядке
 	for _, key := range componentOrder {
-		if val, exists := data[key]; exists {
-			ordered[key] = p.reorderNestedFields(val)
+		if valueNode, exists := nodeMap[key]; exists {
+			newContent = append(newContent, p.createKeyNode(key), valueNode)
 			processed[key] = true
+			p.reorderYAMLNode(valueNode)
 		}
 	}
 
-	// Затем добавляем остальные секции
-	for k, val := range data {
-		if !processed[k] {
-			ordered[k] = p.reorderNestedFields(val)
+	for key, valueNode := range nodeMap {
+		if !processed[key] {
+			newContent = append(newContent, p.createKeyNode(key), valueNode)
+			p.reorderYAMLNode(valueNode)
 		}
 	}
 
-	return ordered
+	node.Content = newContent
 }
 
 func (p *Parser) unmarshalByContent(data []byte, v interface{}) error {
