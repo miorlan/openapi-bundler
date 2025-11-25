@@ -129,16 +129,17 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 		}
 	}
 	
-	// Убираем специальные символы, оставляем только буквы, цифры и подчёркивания
+	// Убираем специальные символы, оставляем только буквы, цифры, подчёркивания и дефисы
+	// Дефисы сохраняем, так как они часто используются в именах параметров (например, X-Device-Id)
 	var result strings.Builder
 	for _, char := range name {
-		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' || char == '-' {
 			result.WriteRune(char)
 		} else {
 			// Заменяем все остальные символы на подчёркивание, но не добавляем подряд
 			if result.Len() > 0 {
 				lastChar := result.String()[result.Len()-1]
-				if lastChar != '_' {
+				if lastChar != '_' && lastChar != '-' {
 					result.WriteRune('_')
 				}
 			}
@@ -147,12 +148,12 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 	
 	normalized := result.String()
 	
-	// Убираем множественные подчёркивания
+	// Убираем множественные подчёркивания (но не дефисы)
 	for strings.Contains(normalized, "__") {
 		normalized = strings.ReplaceAll(normalized, "__", "_")
 	}
 	
-	// Убираем подчёркивания в начале и конце
+	// Убираем подчёркивания в начале и конце (но не дефисы)
 	normalized = strings.Trim(normalized, "_")
 	
 	// Если имя пустое после нормализации, генерируем имя
@@ -220,12 +221,12 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 		}
 	}
 	
-	// 4. Генерируем имя на основе пути (Inline_<path>_...)
+	// 4. Fallback: Генерируем имя на основе пути (Inline_<path>_...)
 	if refPath != "" {
 		// Создаём имя на основе пути к файлу
 		pathParts := strings.Split(strings.Trim(refPath, "./"), "/")
 		var pathName strings.Builder
-		pathName.WriteString("Inline")
+		pathName.WriteString("Inline_")
 		for _, part := range pathParts {
 			if part != "" {
 				pathName.WriteString("_")
@@ -238,7 +239,7 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 	}
 	
 	// Последний резерв: генерируем имя на основе контекста
-	// Используем хеш содержимого для создания уникального имени, если возможно
+	// НЕ используем счётчик (SchemaN), а используем путь или тип
 	if componentContent != nil {
 		// Пытаемся создать имя на основе структуры содержимого
 		if schemaMap, ok := componentContent.(map[string]interface{}); ok {
@@ -246,40 +247,47 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 			if schemaType, hasType := schemaMap["type"]; hasType {
 				if typeStr, ok := schemaType.(string); ok {
 					typeName := strings.Title(typeStr) // object -> Object, array -> Array
-					r.componentCounter[componentType]++
-					name := fmt.Sprintf("Inline_%s_%d", typeName, r.componentCounter[componentType])
-					return r.normalizeComponentName(name)
+					// Используем путь, если он есть, иначе только тип
+					if refPath != "" {
+						pathParts := strings.Split(strings.Trim(refPath, "./"), "/")
+						var pathName strings.Builder
+						pathName.WriteString("Inline_")
+						for _, part := range pathParts {
+							if part != "" {
+								pathName.WriteString(strings.TrimSuffix(part, filepath.Ext(part)))
+								pathName.WriteString("_")
+							}
+						}
+						pathName.WriteString(typeName)
+						return r.normalizeComponentName(pathName.String())
+					}
+					return r.normalizeComponentName(fmt.Sprintf("Inline_%s", typeName))
 				}
 			}
 		}
 	}
 	
 	// Самый последний резерв: используем путь из ref, если он есть
-	if ref != "" {
-		// Даже если refPath пустой, может быть что-то в ref
-		refParts := strings.Split(ref, "/")
-		if len(refParts) > 0 {
-			lastPart := refParts[len(refParts)-1]
-			// Убираем фрагмент если есть
-			lastPart = strings.Split(lastPart, "#")[0]
-			if lastPart != "" && lastPart != "." && lastPart != ".." {
-				baseName := strings.TrimSuffix(lastPart, filepath.Ext(lastPart))
-				if baseName != "" {
-					name := "Inline_" + baseName
-					return r.normalizeComponentName(name)
-				}
+	if refPath != "" {
+		pathParts := strings.Split(strings.Trim(refPath, "./"), "/")
+		var pathName strings.Builder
+		pathName.WriteString("Inline_")
+		for _, part := range pathParts {
+			if part != "" {
+				pathName.WriteString(strings.TrimSuffix(part, filepath.Ext(part)))
+				pathName.WriteString("_")
 			}
 		}
+		pathName.WriteString(componentType)
+		return r.normalizeComponentName(pathName.String())
 	}
 	
-	// Абсолютно последний резерв: генерируем имя с префиксом Inline
-	r.componentCounter[componentType]++
+	// Абсолютно последний резерв: используем тип компонента без счётчика
 	baseName := componentType[:len(componentType)-1] // schemas -> schema
 	if len(baseName) > 0 {
 		baseName = strings.Title(baseName) // schema -> Schema
 	}
-	generatedName := fmt.Sprintf("Inline_%s%d", baseName, r.componentCounter[componentType])
-	return r.normalizeComponentName(generatedName)
+	return r.normalizeComponentName(fmt.Sprintf("Inline_%s", baseName))
 }
 
 func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, section map[string]interface{}, componentType string) string {

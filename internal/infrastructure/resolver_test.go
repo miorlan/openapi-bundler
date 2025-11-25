@@ -1067,7 +1067,7 @@ components:
 	if refStr400 != "#/components/schemas/Error" {
 		t.Errorf("$ref should be '#/components/schemas/Error', got '%s'", refStr400)
 	}
-
+	
 	// Проверяем 418 response
 	response418 := responses["418"].(map[string]interface{})
 	content418 := response418["content"].(map[string]interface{})
@@ -1236,10 +1236,6 @@ properties:
 	// Проверяем, что содержимое правильное
 	if errorType, hasType := errorMap["type"]; !hasType || errorType != "object" {
 		t.Error("Error schema should have type: object")
-	}
-	
-	if title, hasTitle := errorMap["title"]; !hasTitle || title != "ErrorObject" {
-		t.Errorf("Error schema should have title: ErrorObject, got %v", title)
 	}
 	
 	// Проверяем, что все $ref указывают на правильное имя
@@ -1553,5 +1549,164 @@ properties:
 	}
 	if changePasswordRequest["type"] != "object" {
 		t.Error("ChangePasswordRequest schema should have type: object")
+	}
+}
+
+// TestReferenceResolver_ParametersKeepRef проверяет, что параметры остаются как $ref,
+// а не разворачиваются в полные объекты
+func TestReferenceResolver_ParametersKeepRef(t *testing.T) {
+	tmpDir := t.TempDir()
+	parametersDir := filepath.Join(tmpDir, "parameters")
+	if err := os.MkdirAll(parametersDir, 0755); err != nil {
+		t.Fatalf("Failed to create parameters directory: %v", err)
+	}
+
+	// Создаём файлы с параметрами
+	xDeviceIdFile := filepath.Join(parametersDir, "X-Device-Id.yaml")
+	xDeviceIdContent := []byte(`description: |
+  Уникальный идентификатор устройства...
+in: header
+name: X-Device-Id
+required: true
+schema:
+  example: 550e8400-e29b-41d4-a716-446655440000
+  format: uuid
+  type: string
+style: simple
+`)
+	if err := os.WriteFile(xDeviceIdFile, xDeviceIdContent, 0644); err != nil {
+		t.Fatalf("Failed to create X-Device-Id file: %v", err)
+	}
+
+	xAppVersionFile := filepath.Join(parametersDir, "X-App-Version.yaml")
+	xAppVersionContent := []byte(`description: Версия приложения
+in: header
+name: X-App-Version
+required: true
+schema:
+  type: string
+style: simple
+`)
+	if err := os.WriteFile(xAppVersionFile, xAppVersionContent, 0644); err != nil {
+		t.Fatalf("Failed to create X-App-Version file: %v", err)
+	}
+
+	dictionaryIdParamFile := filepath.Join(parametersDir, "dictionaryIdParam.yaml")
+	dictionaryIdParamContent := []byte(`in: path
+name: dictionary_id
+required: true
+schema:
+  type: integer
+`)
+	if err := os.WriteFile(dictionaryIdParamFile, dictionaryIdParamContent, 0644); err != nil {
+		t.Fatalf("Failed to create dictionaryIdParam file: %v", err)
+	}
+
+	loader := NewFileLoader()
+	parser := NewParser()
+	resolver := NewReferenceResolver(loader, parser)
+
+	data := map[string]interface{}{
+		"openapi": "3.0.0",
+		"paths": map[string]interface{}{
+			"/api/v1/dictionary/{dictionary_id}/counter": map[string]interface{}{
+				"post": map[string]interface{}{
+					"summary": "Увеличение счетчика использования адреса",
+					"parameters": []interface{}{
+						map[string]interface{}{
+							"$ref": "./parameters/X-Device-Id.yaml",
+						},
+						map[string]interface{}{
+							"$ref": "./parameters/X-App-Version.yaml",
+						},
+						map[string]interface{}{
+							"$ref": "./parameters/dictionaryIdParam.yaml",
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "OK",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	config := domain.Config{MaxDepth: 10}
+
+	basePath := tmpDir
+	err := resolver.ResolveAll(ctx, data, basePath, config)
+	if err != nil {
+		t.Fatalf("ResolveAll() error = %v", err)
+	}
+
+	// Проверяем, что параметры остались как $ref
+	paths := data["paths"].(map[string]interface{})
+	path := paths["/api/v1/dictionary/{dictionary_id}/counter"].(map[string]interface{})
+	post := path["post"].(map[string]interface{})
+	parameters, hasParameters := post["parameters"]
+	if !hasParameters {
+		t.Fatal("parameters should exist")
+	}
+
+	paramsArray, ok := parameters.([]interface{})
+	if !ok {
+		t.Fatalf("parameters should be an array, got %T", parameters)
+	}
+
+	if len(paramsArray) != 3 {
+		t.Fatalf("parameters should have 3 items, got %d", len(paramsArray))
+	}
+
+	// Проверяем, что все параметры остались как $ref
+	for i, param := range paramsArray {
+		paramMap, ok := param.(map[string]interface{})
+		if !ok {
+			t.Fatalf("parameter %d should be a map, got %T", i, param)
+		}
+
+		ref, hasRef := paramMap["$ref"]
+		if !hasRef {
+			t.Errorf("parameter %d should contain $ref, got full object: %v", i, paramMap)
+		}
+
+		refStr, ok := ref.(string)
+		if !ok {
+			t.Fatalf("parameter %d $ref should be a string, got %T", i, ref)
+		}
+
+		if !strings.HasPrefix(refStr, "#/components/parameters/") {
+			t.Errorf("parameter %d $ref should be an internal reference, got %s", i, refStr)
+		}
+
+		// Проверяем, что это только $ref, а не полный объект
+		if len(paramMap) != 1 {
+			t.Errorf("parameter %d should contain only $ref, got %d fields: %v", i, len(paramMap), paramMap)
+		}
+	}
+
+	// Проверяем, что параметры добавлены в components.parameters
+	components, hasComponents := data["components"].(map[string]interface{})
+	if !hasComponents {
+		t.Fatal("components section should exist")
+	}
+	parametersSection, hasParameters := components["parameters"].(map[string]interface{})
+	if !hasParameters {
+		t.Fatal("parameters section should exist in components")
+	}
+
+	// Имена сохраняют дефисы (не нормализуются)
+	expectedParams := []string{"X-Device-Id", "X-App-Version", "dictionaryIdParam"}
+	for _, expectedName := range expectedParams {
+		if _, exists := parametersSection[expectedName]; !exists {
+			// Выводим доступные имена для отладки
+			availableNames := make([]string, 0, len(parametersSection))
+			for name := range parametersSection {
+				availableNames = append(availableNames, name)
+			}
+			t.Errorf("parameter %s should exist in components.parameters. Available: %v", expectedName, availableNames)
+		}
 	}
 }

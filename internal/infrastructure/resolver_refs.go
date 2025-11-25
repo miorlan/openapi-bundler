@@ -151,6 +151,46 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 		}
 
 		for k, v := range n {
+			// Специальная обработка для параметров в методах HTTP (get, post, put, delete, etc.)
+			// Параметры должны оставаться как $ref, а не разворачиваться
+			// ЭТО ДОЛЖНО БЫТЬ ПЕРЕД обработкой paths, чтобы сработать для параметров в методах
+			if k == "parameters" {
+				if paramsArray, ok := v.([]interface{}); ok {
+					for i, param := range paramsArray {
+						if paramMap, ok := param.(map[string]interface{}); ok {
+							if refVal, hasRef := paramMap["$ref"]; hasRef {
+								if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
+									// Это внешняя ссылка на параметр
+									// Создаём компонент в components.parameters, но оставляем $ref в массиве
+									internalRef, err := r.resolveAndReplaceExternalRefWithType(ctx, refStr, baseDir, config, depth, "parameters")
+									if err == nil && internalRef != "" {
+										// Заменяем элемент массива на только $ref
+										paramsArray[i] = map[string]interface{}{
+											"$ref": internalRef,
+										}
+										continue
+									}
+								} else if refStr, ok := refVal.(string); ok && strings.HasPrefix(refStr, "#/components/parameters/") {
+									// Это уже внутренняя ссылка на параметр - не обрабатываем дальше
+									continue
+								}
+							}
+							// Если элемент содержит только $ref (внутреннюю), не обрабатываем рекурсивно
+							if len(paramMap) == 1 {
+								if _, hasRef := paramMap["$ref"]; hasRef {
+									continue
+								}
+							}
+						}
+						// Для параметров без внешней ссылки обрабатываем рекурсивно (внутренние ссылки)
+						if err := r.replaceExternalRefs(ctx, param, baseDir, config, depth); err != nil {
+							return fmt.Errorf("failed to process parameter %d: %w", i, err)
+						}
+					}
+					continue
+				}
+			}
+
 			if k == "paths" {
 				if pathsMap, ok := v.(map[string]interface{}); ok {
 					pathsBaseDir := baseDir
@@ -224,7 +264,36 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 		}
 
 	case []interface{}:
+		// Специальная обработка для массивов параметров
+		// Параметры должны оставаться как $ref, а не разворачиваться
 		for i, item := range n {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				// Проверяем, является ли это параметром с внешней ссылкой
+				if refVal, hasRef := itemMap["$ref"]; hasRef {
+					if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
+						// Это внешняя ссылка на параметр
+						// Создаём компонент в components.parameters, но оставляем $ref в массиве
+						internalRef, err := r.resolveAndReplaceExternalRef(ctx, refStr, baseDir, config, depth)
+						if err == nil && internalRef != "" {
+							// Заменяем элемент массива на только $ref
+							n[i] = map[string]interface{}{
+								"$ref": internalRef,
+							}
+							continue
+						}
+					} else if refStr, ok := refVal.(string); ok && strings.HasPrefix(refStr, "#/components/parameters/") {
+						// Это уже внутренняя ссылка на параметр - не обрабатываем дальше
+						continue
+					}
+				}
+				// Если элемент содержит только $ref (внутреннюю), не обрабатываем рекурсивно
+				if len(itemMap) == 1 {
+					if _, hasRef := itemMap["$ref"]; hasRef {
+						continue
+					}
+				}
+			}
+			// Для остальных элементов массива обрабатываем рекурсивно
 			if err := r.replaceExternalRefs(ctx, item, baseDir, config, depth); err != nil {
 				return fmt.Errorf("failed to process array item %d: %w", i, err)
 			}
@@ -237,6 +306,10 @@ func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interf
 }
 
 func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (string, error) {
+	return r.resolveAndReplaceExternalRefWithType(ctx, ref, baseDir, config, depth, "")
+}
+
+func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Context, ref string, baseDir string, config domain.Config, depth int, preferredComponentType string) (string, error) {
 	refParts := strings.SplitN(ref, "#", 2)
 	refPath := refParts[0]
 	fragment := ""
@@ -298,7 +371,10 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 	}
 
 	var componentContent interface{}
-	componentType := "schemas"
+	componentType := preferredComponentType
+	if componentType == "" {
+		componentType = "schemas"
+	}
 	
 	if fragment != "" {
 		extracted, err := r.resolveJSONPointer(content, fragment)
@@ -350,14 +426,24 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, re
 					return "", fmt.Errorf("external file does not contain components: %s", ref)
 				}
 			} else {
-				// Файл содержит схему напрямую (не в components)
-				if _, hasType := contentMap["type"]; hasType {
+				// Файл содержит компонент напрямую (не в components)
+				// Проверяем тип компонента по содержимому или используем preferredComponentType
+				if preferredComponentType != "" {
+					// Используем предпочтительный тип (например, "parameters")
+					componentContent = contentMap
+					componentType = preferredComponentType
+				} else if _, hasType := contentMap["type"]; hasType {
+					// Это схема
 					componentContent = contentMap
 					componentType = "schemas"
-					// Имя будет определено из имени файла в getPreferredComponentName
+				} else if _, hasIn := contentMap["in"]; hasIn {
+					// Это параметр (имеет поле "in")
+					componentContent = contentMap
+					componentType = "parameters"
 				} else {
 					return "", fmt.Errorf("external file does not contain components section or schema: %s", ref)
 				}
+				// Имя будет определено из имени файла в getPreferredComponentName
 			}
 		} else {
 			return "", fmt.Errorf("external file content is not a map: %s", ref)
