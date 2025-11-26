@@ -24,6 +24,7 @@ type ReferenceResolver struct {
 	rootBasePath string
 	refToComponentName map[string]string // Кэш: исходный $ref -> имя компонента
 	componentUsageCount map[string]int // Счетчик использования компонентов по хешу
+	externalRefUsageCount map[string]int // Счетчик использования внешних ссылок (для определения, инлайнить или извлечь)
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
@@ -45,6 +46,7 @@ func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) do
 		componentHashes: make(map[string]string),
 		refToComponentName: make(map[string]string),
 		componentUsageCount: make(map[string]int),
+		externalRefUsageCount: make(map[string]int),
 	}
 }
 
@@ -58,6 +60,7 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 	r.componentHashes = make(map[string]string)
 	r.refToComponentName = make(map[string]string)
 	r.componentUsageCount = make(map[string]int)
+	r.externalRefUsageCount = make(map[string]int)
 	for _, ct := range componentTypes {
 		r.components[ct] = make(map[string]interface{})
 		r.componentCounter[ct] = 0
@@ -90,7 +93,12 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 		}
 	}
 
-	// ОДИН проход replaceExternalRefs - он обработает все ссылки и соберёт компоненты
+	// ПЕРВЫЙ ПРОХОД: Подсчитываем использование внешних ссылок
+	if err := r.countExternalRefUsage(ctx, data, basePath, config, 0); err != nil {
+		return err
+	}
+
+	// ВТОРОЙ ПРОХОД: Обрабатываем ссылки (инлайним одноразовые, извлекаем многоразовые)
 	if err := r.replaceExternalRefs(ctx, data, basePath, config, 0); err != nil {
 		return err
 	}
@@ -191,12 +199,9 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 		}
 	}
 
-	// "Поднимаем" $ref в components после разрешения всех ссылок
 	if err := r.liftComponentRefs(ctx, data, config); err != nil {
 		return err
 	}
-
-	// Не инлайним компоненты - все схемы и параметры остаются как $ref в components
 
 	r.cleanNilValues(data)
 

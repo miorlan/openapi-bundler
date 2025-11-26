@@ -10,10 +10,6 @@ import (
 	"github.com/miorlan/openapi-bundler/internal/domain"
 )
 
-func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interface{}, baseDir string, config domain.Config, depth int) error {
-	return r.replaceExternalRefsWithContext(ctx, node, baseDir, config, depth, false, false)
-}
-
 func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, node interface{}, baseDir string, config domain.Config, depth int, inContentContext bool, inSchemaContext bool) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -25,9 +21,6 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 
 	switch n := node.(type) {
 	case map[string]interface{}:
-		// Специальная обработка для параметров в методах HTTP (get, post, put, delete, etc.)
-		// Параметры должны оставаться как $ref, а не разворачиваться
-		// ЭТО ДОЛЖНО БЫТЬ ПЕРЕД обработкой $ref, чтобы сработать для параметров в методах
 		if paramsArray, ok := n["parameters"].([]interface{}); ok {
 			for i, param := range paramsArray {
 				if paramMap, ok := param.(map[string]interface{}); ok {
@@ -164,7 +157,6 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				return &domain.ErrInvalidReference{Ref: fmt.Sprintf("%v", refVal)}
 			}
 
-
 			if strings.HasPrefix(refStr, "#") {
 				return nil
 			}
@@ -193,32 +185,30 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				return nil
 			}
 
-			internalRef, err := r.resolveAndReplaceExternalRefWithContext(ctx, refStr, baseDir, config, depth, false)
-			if err == nil && internalRef != "" {
-				n["$ref"] = internalRef
-				return nil
-			}
-
+			expanded, err := r.expandExternalRefInline(ctx, refStr, baseDir, config, depth)
 			if err != nil {
-				expanded, expandErr := r.expandPathRef(ctx, refStr, baseDir, config, depth)
-				if expandErr == nil && expanded != nil {
-					for k, v := range expanded {
+				expandedPath, expandErr := r.expandPathRef(ctx, refStr, baseDir, config, depth)
+				if expandErr == nil && expandedPath != nil {
+					for k, v := range expandedPath {
 						n[k] = v
 					}
 					delete(n, "$ref")
 					return nil
 				}
-				return fmt.Errorf("failed to replace external ref %s: %w", refStr, err)
+				return fmt.Errorf("failed to inline external ref %s: %w", refStr, err)
 			}
+
+			for k, v := range expanded {
+				n[k] = v
+			}
+			delete(n, "$ref")
 
 			return nil
 		}
 
 		for k, v := range n {
-			// Обрабатываем content как обычно - все схемы создают компоненты
 			if k == "content" {
 				if contentMap, ok := v.(map[string]interface{}); ok {
-					// Обрабатываем content - все схемы создают компоненты
 					if err := r.replaceExternalRefsWithContext(ctx, contentMap, baseDir, config, depth, false, false); err != nil {
 						return fmt.Errorf("failed to process content: %w", err)
 					}
@@ -226,42 +216,6 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				}
 			}
 
-			// Обрабатываем schema в content - все схемы создают компоненты
-			if k == "schema" && inContentContext {
-				if schemaMap, ok := v.(map[string]interface{}); ok {
-					// Сначала обрабатываем вложенные ссылки
-					if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, false, false); err != nil {
-						return fmt.Errorf("failed to process schema: %w", err)
-					}
-					// Если схема не содержит $ref (inline схема), извлекаем её в компоненты
-					if _, hasRef := schemaMap["$ref"]; !hasRef {
-						// Извлекаем inline схему в компоненты
-						componentName := r.getPreferredComponentName("", "", "schemas", schemaMap)
-						componentHash := r.hashComponent(schemaMap)
-						
-						// Проверяем, не существует ли уже компонент с таким же содержимым
-						if existingName, exists := r.componentHashes[componentHash]; exists {
-							// Используем существующее имя
-							n[k] = map[string]interface{}{
-								"$ref": "#/components/schemas/" + existingName,
-							}
-						} else {
-							// Создаём новый компонент
-							componentName = r.ensureUniqueComponentName(componentName, r.components["schemas"], "schemas")
-							r.components["schemas"][componentName] = r.deepCopy(schemaMap)
-							r.componentHashes[componentHash] = componentName
-							r.componentUsageCount[componentHash]++
-							// Заменяем схему на $ref
-							n[k] = map[string]interface{}{
-								"$ref": "#/components/schemas/" + componentName,
-							}
-						}
-					}
-					continue
-				}
-			}
-
-			// Параметры уже обработаны выше, пропускаем
 			if k == "parameters" {
 				continue
 			}
@@ -378,42 +332,6 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 	}
 
 	return nil
-}
-
-func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (string, error) {
-	return r.resolveAndReplaceExternalRefWithType(ctx, ref, baseDir, config, depth, "", false)
-}
-
-func (r *ReferenceResolver) resolveAndReplaceExternalRefWithContext(ctx context.Context, ref string, baseDir string, config domain.Config, depth int, skipExtraction bool) (string, error) {
-	return r.resolveAndReplaceExternalRefWithType(ctx, ref, baseDir, config, depth, "", skipExtraction)
-}
-
-// loadAndParseRefFile загружает и парсит файл по ссылке (общая логика для resolveAndReplaceExternalRefWithType и expandExternalRefInline)
-func (r *ReferenceResolver) loadAndParseRefFile(ctx context.Context, refPath string, config domain.Config) (interface{}, error) {
-	if cached, ok := r.fileCache[refPath]; ok {
-		return cached, nil
-	}
-
-	data, err := r.fileLoader.Load(ctx, refPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, &ErrFileNotFound{Path: refPath}
-		}
-		return nil, fmt.Errorf("failed to load file: %w", err)
-	}
-
-	if config.MaxFileSize > 0 && int64(len(data)) > config.MaxFileSize {
-		return nil, fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
-	}
-
-	format := domain.DetectFormat(refPath)
-	var content interface{}
-	if err := r.parser.Unmarshal(data, &content, format); err != nil {
-		return nil, fmt.Errorf("failed to parse file: %w", err)
-	}
-
-	r.fileCache[refPath] = content
-	return content, nil
 }
 
 func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Context, ref string, baseDir string, config domain.Config, depth int, preferredComponentType string, skipExtraction bool) (string, error) {
@@ -864,9 +782,6 @@ func (r *ReferenceResolver) expandPathRef(ctx context.Context, ref string, baseD
 	return expanded, nil
 }
 
-// expandExternalRefInline загружает содержимое внешнего $ref и возвращает его для inline-замены
-// НЕ создает компонент в components
-// ВАЖНО: Не использует кэш componentRefs, чтобы избежать создания компонента
 func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (map[string]interface{}, error) {
 	refParts := strings.SplitN(ref, "#", 2)
 	refPath := refParts[0]
@@ -887,10 +802,6 @@ func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref str
 	if !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
 		refPath = filepath.Clean(refPath)
 	}
-
-	// ВАЖНО: Не проверяем visitedKey и componentRefs, чтобы избежать использования кэша
-	// и создания компонента. Мы хотим только загрузить содержимое для inline-замены.
-	// Также не помечаем visitedKey как посещенный, чтобы не создавать компонент через другой путь.
 
 	content, err := r.loadAndParseRefFile(ctx, refPath, config)
 	if err != nil {
@@ -919,8 +830,6 @@ func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref str
 		return nil, fmt.Errorf("component copy is nil for ref: %s", ref)
 	}
 
-	// Обрабатываем вложенные ссылки, но НЕ извлекаем в components
-	// ВАЖНО: передаем inContentContext = false, чтобы вложенные ссылки создавали компоненты
 	nextBaseDir := baseDir
 	if strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") {
 		nextBaseDir = refPath[:strings.LastIndex(refPath, "/")+1]

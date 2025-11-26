@@ -52,6 +52,28 @@ func (r *ReferenceResolver) getRefPath(ref string, baseDir string) string {
 	return filepath.Clean(result)
 }
 
+// normalizeRefPathForCount нормализует путь для подсчета использований
+// Использует абсолютный путь для консистентности между подсчетом и обработкой
+func (r *ReferenceResolver) normalizeRefPathForCount(refPath string) string {
+	if refPath == "" {
+		return ""
+	}
+	
+	if strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") {
+		return refPath
+	}
+	
+	// Очищаем путь
+	refPath = filepath.Clean(refPath)
+	
+	// Делаем абсолютный путь для консистентности
+	if absPath, err := filepath.Abs(refPath); err == nil {
+		return absPath
+	}
+	
+	return refPath
+}
+
 func (r *ReferenceResolver) resolveJSONPointer(doc interface{}, pointer string) (interface{}, error) {
 	if !strings.HasPrefix(pointer, "#/") {
 		return nil, fmt.Errorf("invalid JSON pointer format: %s", pointer)
@@ -363,6 +385,113 @@ func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, sect
 		}
 		name = b.String()
 	}
+}
+
+// isSimpleSchema проверяет, является ли схема простой (не должна извлекаться в компоненты)
+// Простые схемы - это схемы с базовыми типами без сложных структур
+func (r *ReferenceResolver) isSimpleSchema(schema map[string]interface{}) bool {
+	if schema == nil {
+		return false
+	}
+	
+	// Если есть $ref, это не простая схема
+	if _, hasRef := schema["$ref"]; hasRef {
+		return false
+	}
+	
+	// Получаем тип схемы
+	schemaType, hasType := schema["type"].(string)
+	if !hasType {
+		// Если нет типа, но есть другие специфичные поля OpenAPI, это не простая схема
+		if _, hasProperties := schema["properties"]; hasProperties {
+			return false
+		}
+		if _, hasItems := schema["items"]; hasItems {
+			return false
+		}
+		if _, hasAllOf := schema["allOf"]; hasAllOf {
+			return false
+		}
+		if _, hasOneOf := schema["oneOf"]; hasOneOf {
+			return false
+		}
+		if _, hasAnyOf := schema["anyOf"]; hasAnyOf {
+			return false
+		}
+		// Если нет типа и нет сложных структур, считаем простой
+		return true
+	}
+	
+	// Проверяем количество полей (исключая стандартные поля простых типов)
+	allowedSimpleFields := map[string]bool{
+		"type":        true,
+		"format":       true,
+		"example":      true,
+		"default":      true,
+		"enum":         true,
+		"description":  true,
+		"minLength":    true,
+		"maxLength":    true,
+		"minimum":      true,
+		"maximum":      true,
+		"pattern":      true,
+		"nullable":     true,
+		"deprecated":   true,
+	}
+	
+	// Для простых типов (string, integer, number, boolean) считаем простой, если только стандартные поля
+	if schemaType == "string" || schemaType == "integer" || schemaType == "number" || schemaType == "boolean" {
+		for key := range schema {
+			if !allowedSimpleFields[key] {
+				return false
+			}
+		}
+		return true
+	}
+	
+	// Для массива проверяем, простой ли тип элементов
+	if schemaType == "array" {
+		if items, hasItems := schema["items"].(map[string]interface{}); hasItems {
+			// Если элементы массива - простые, то и массив простой
+			return r.isSimpleSchema(items)
+		}
+		// Если items - это $ref, массив не простой
+		if items, hasItems := schema["items"]; hasItems {
+			if itemsMap, ok := items.(map[string]interface{}); ok {
+				if _, hasRef := itemsMap["$ref"]; hasRef {
+					return false
+				}
+			}
+		}
+		// Если items не указан или простой, массив простой
+		return true
+	}
+	
+	// Для object - всегда не простая (даже если пустая)
+	if schemaType == "object" {
+		// Проверяем, есть ли properties
+		if properties, hasProperties := schema["properties"].(map[string]interface{}); hasProperties {
+			// Если properties пустые или содержат только простые типы, это может быть простой
+			if len(properties) == 0 {
+				return true
+			}
+			// Если есть хотя бы одно свойство, это не простая схема
+			return false
+		}
+		// Если нет properties, но есть другие поля, это не простая схема
+		if len(schema) > 1 {
+			return false
+		}
+		return true
+	}
+	
+	// Для остальных типов считаем простой, если только стандартные поля
+	for key := range schema {
+		if !allowedSimpleFields[key] {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *ReferenceResolver) hashComponent(component interface{}) string {
