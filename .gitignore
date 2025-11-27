@@ -4,9 +4,9 @@
 *.dll
 *.so
 *.dylib
-openapi-bundler
 swagger-cli
 openapi
+rest
 
 # Test binary
 *.test

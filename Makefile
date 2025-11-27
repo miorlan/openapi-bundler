@@ -12,7 +12,7 @@ help: ## Показать справку
 
 build: ## Собрать бинарный файл
 	@echo "🔨 Сборка $(BINARY_NAME)..."
-	@go build -o $(BINARY_NAME) ./cmd
+	@go build -o $(BINARY_NAME) ./cmd/openapi-bundler
 	@echo "✅ Готово: ./$(BINARY_NAME)"
 
 install: build ## Установить в $(INSTALL_PATH) с созданием симлинка
@@ -24,15 +24,8 @@ install: build ## Установить в $(INSTALL_PATH) с созданием 
 
 install-go: ## Установить через go install и создать симлинк
 	@echo "📦 Установка через go install..."
-	@go install ./cmd
-	@echo "🔗 Создание симлинка openapi-bundler -> cmd..."
-	@if [ -f "$(INSTALL_PATH)/cmd" ]; then \
-		ln -sf $(INSTALL_PATH)/cmd $(INSTALL_PATH)/openapi-bundler; \
-		echo "✅ Симлинк создан: $(INSTALL_PATH)/openapi-bundler -> $(INSTALL_PATH)/cmd"; \
-	else \
-		echo "❌ Ошибка: $(INSTALL_PATH)/cmd не найден"; \
-		exit 1; \
-	fi
+	@go install ./cmd/openapi-bundler
+	@echo "✅ Установлено: $(INSTALL_PATH)/openapi-bundler"
 	@echo "💡 Убедитесь, что $(INSTALL_PATH) в вашем PATH"
 
 clean: ## Удалить собранные файлы
@@ -59,15 +52,23 @@ install-man: ## Установить man pages (требуются права su
 	@mandb > /dev/null 2>&1 || true
 	@echo "✅ Man pages установлены. Используйте: man openapi-bundler"
 
-.PHONY: codegen api
+.PHONY: codegen api api-json
 
-codegen: api1 api
+codegen: api-yaml swagger-yaml api-json swagger-json
 
-api: build
+api-yaml: build
 	@# Используем локальный бинарный файл
 	@./$(BINARY_NAME) bundle -o openapi/openapi.custom.yaml openapi/index.yaml
 
-api1:
-	echo "Запуск oapi-codegen"
+swagger-yaml:
+	echo "запуск сборки swagger-cli"
 	@# Используем swagger-cli через npx, чтобы не требовалась глобальная установка
 	npx --yes swagger-cli bundle -o openapi/openapi.yaml openapi/index.yaml --type yaml
+
+api-json: build
+	@# Используем локальный бинарный файл
+	@./$(BINARY_NAME) bundle -o rest/rest.custom.json rest/auth/auth.json
+
+swagger-json:
+	echo "запуск сборки swagger-cli"
+	npx --yes swagger-cli bundle -o rest/rest.json rest/auth/auth.json --type json

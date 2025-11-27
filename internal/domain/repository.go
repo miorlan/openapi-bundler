@@ -5,6 +5,7 @@ import "context"
 type Config struct {
 	MaxFileSize int64
 	MaxDepth    int
+	Inline      bool
 }
 
 type FileLoader interface {

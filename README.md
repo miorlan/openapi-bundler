@@ -75,8 +75,6 @@ go get github.com/miorlan/openapi-bundler
 # Базовое использование (YAML)
 openapi-bundler bundle -i api/openapi/index.yaml -o api/openapi/openapi.gen.yaml
 
-# Работа с JSON
-openapi-bundler bundle -i api/openapi/index.json -o api/openapi/openapi.gen.json
 
 # Конвертация форматов (YAML -> JSON)
 openapi-bundler bundle -i api/openapi/index.yaml -o api/openapi/openapi.gen.json
@@ -98,7 +96,6 @@ openapi-bundler bundle -i input.yaml -o output.yaml --verbose
 # Прямая замена swagger-cli - работает точно так же!
 openapi-bundler bundle -o api/openapi/openapi.yaml api/openapi/index.yaml
 openapi-bundler bundle -o api/openapi/openapi.yaml api/openapi/index.yaml --type yaml
-openapi-bundler bundle -o api/openapi/openapi.json api/openapi/index.json --type json
 ```
 
 **Другие команды:**

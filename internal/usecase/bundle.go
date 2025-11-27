@@ -13,6 +13,7 @@ type Config struct {
 	Validate    bool
 	MaxFileSize int64
 	MaxDepth    int
+	Inline      bool
 }
 
 type BundleUseCase struct {
@@ -69,6 +70,7 @@ func (uc *BundleUseCase) Execute(ctx context.Context, inputPath, outputPath stri
 	domainConfig := domain.Config{
 		MaxFileSize: config.MaxFileSize,
 		MaxDepth:    config.MaxDepth,
+		Inline:      config.Inline,
 	}
 	if err := uc.referenceResolver.ResolveAll(ctx, root, basePath, domainConfig); err != nil {
 		return fmt.Errorf("failed to resolve references: %w", err)

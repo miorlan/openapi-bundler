@@ -4,7 +4,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/miorlan/openapi-bundler/internal/infrastructure"
+	"github.com/miorlan/openapi-bundler/internal/infrastructure/loader"
+	"github.com/miorlan/openapi-bundler/internal/infrastructure/parser"
+	"github.com/miorlan/openapi-bundler/internal/infrastructure/resolver"
+	"github.com/miorlan/openapi-bundler/internal/infrastructure/validator"
+	"github.com/miorlan/openapi-bundler/internal/infrastructure/writer"
 	"github.com/miorlan/openapi-bundler/internal/usecase"
 )
 
@@ -61,18 +65,18 @@ func New(opts ...Option) *Bundler {
 		opt(config)
 	}
 
-	fileLoader := infrastructure.NewFileLoaderWithTimeout(config.HTTPTimeout)
-	fileWriter := infrastructure.NewFileWriter()
-	parser := infrastructure.NewParser()
-	referenceResolver := infrastructure.NewReferenceResolver(fileLoader, parser)
-	validator := infrastructure.NewValidator()
+	fileLoader := loader.NewFileLoaderWithTimeout(config.HTTPTimeout)
+	fileWriter := writer.NewFileWriter()
+	p := parser.NewParser()
+	referenceResolver := resolver.NewReferenceResolver(fileLoader, p)
+	v := validator.NewValidator()
 
 	useCase := usecase.NewBundleUseCase(
 		fileLoader,
 		fileWriter,
-		parser,
+		p,
 		referenceResolver,
-		validator,
+		v,
 	)
 
 	return &Bundler{
