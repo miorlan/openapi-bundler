@@ -9,37 +9,29 @@ import (
 	"github.com/miorlan/openapi-bundler/internal/domain"
 )
 
-// countExternalRefUsage подсчитывает использование внешних ссылок (первый проход)
 func (r *ReferenceResolver) countExternalRefUsage(ctx context.Context, node interface{}, baseDir string, config domain.Config, depth int) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 
 	if config.MaxDepth > 0 && depth > config.MaxDepth {
-		return nil // Не считаем, если превышена глубина
+		return nil
 	}
 
 	switch n := node.(type) {
 	case map[string]interface{}:
-		// Определяем правильный baseDir для текущего контекста
 		currentBaseDir := baseDir
-		// Если это paths секция, используем pathsBaseDir
 		if _, isPaths := n["paths"]; isPaths {
 			if r.pathsBaseDir != "" {
 				currentBaseDir = r.pathsBaseDir
 			}
 		}
-		// Если это components/schemas секция, используем componentsBaseDir
-		// Проверяем, находимся ли мы внутри components/schemas
 		if schemasBaseDir, exists := r.componentsBaseDir["schemas"]; exists && schemasBaseDir != "" {
-			// Если baseDir указывает на schemas директорию, используем componentsBaseDir
-			// ИЛИ если мы обрабатываем схемы в components (baseDir может быть корневым)
 			if strings.Contains(baseDir, "schemas") || baseDir == schemasBaseDir || strings.HasSuffix(baseDir, "schemas") {
 				currentBaseDir = schemasBaseDir
 			}
 		}
 
-		// Специальная обработка для paths - используем pathsBaseDir
 		if pathsMap, ok := n["paths"].(map[string]interface{}); ok {
 			pathsBaseDir := baseDir
 			if r.pathsBaseDir != "" {
@@ -54,7 +46,6 @@ func (r *ReferenceResolver) countExternalRefUsage(ctx context.Context, node inte
 			}
 		}
 
-		// Специальная обработка для components - используем componentsBaseDir
 		if componentsMap, ok := n["components"].(map[string]interface{}); ok {
 			for _, ct := range componentTypes {
 				if section, ok := componentsMap[ct].(map[string]interface{}); ok {
@@ -71,18 +62,15 @@ func (r *ReferenceResolver) countExternalRefUsage(ctx context.Context, node inte
 			}
 		}
 
-		// Обрабатываем $ref
 		if refVal, ok := n["$ref"]; ok {
 			if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
 				refParts := strings.SplitN(refStr, "#", 2)
 				refPath := refParts[0]
 				if refPath != "" {
-					// Определяем правильный baseDir для подсчета
 					baseDirForCount := currentBaseDir
 					if r.pathsBaseDir != "" && strings.Contains(baseDir, "paths") {
 						baseDirForCount = r.pathsBaseDir
 					} else if schemasBaseDir, exists := r.componentsBaseDir["schemas"]; exists && schemasBaseDir != "" {
-						// Проверяем, указывает ли refPath на файл в schemas директории
 						refPathForCheck := r.getRefPath(refPath, currentBaseDir)
 						if refPathForCheck != "" && strings.Contains(refPathForCheck, "schemas") {
 							baseDirForCount = schemasBaseDir
@@ -100,7 +88,6 @@ func (r *ReferenceResolver) countExternalRefUsage(ctx context.Context, node inte
 			}
 		}
 
-		// Рекурсивно обрабатываем все поля
 		for _, v := range n {
 			if err := r.countExternalRefUsage(ctx, v, currentBaseDir, config, depth); err != nil {
 				return err
@@ -118,25 +105,18 @@ func (r *ReferenceResolver) countExternalRefUsage(ctx context.Context, node inte
 	return nil
 }
 
-// replaceExternalRefs обертка для replaceExternalRefsWithContext
 func (r *ReferenceResolver) replaceExternalRefs(ctx context.Context, node interface{}, baseDir string, config domain.Config, depth int) error {
-	// В текущей реализации используем простые булевые флаги контекста
-	// inContentContext=false, inSchemaContext=false
 	return r.replaceExternalRefsWithContext(ctx, node, baseDir, config, depth, false, false)
 }
 
-// resolveAndReplaceExternalRef обертка для resolveAndReplaceExternalRefWithContext
 func (r *ReferenceResolver) resolveAndReplaceExternalRef(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (string, error) {
 	return r.resolveAndReplaceExternalRefWithContext(ctx, ref, baseDir, config, depth, false)
 }
 
-// resolveAndReplaceExternalRefWithContext разрешает внешнюю ссылку и заменяет её на внутреннюю
 func (r *ReferenceResolver) resolveAndReplaceExternalRefWithContext(ctx context.Context, ref string, baseDir string, config domain.Config, depth int, skipExtraction bool) (string, error) {
-	// preferredComponentType пустой, skipExtraction передаём как есть
 	return r.resolveAndReplaceExternalRefWithType(ctx, ref, baseDir, config, depth, "", skipExtraction)
 }
 
-// loadAndParseRefFile загружает и парсит файл по ссылке
 func (r *ReferenceResolver) loadAndParseRefFile(ctx context.Context, refPath string, config domain.Config) (interface{}, error) {
 	if !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
 		refPath = filepath.Clean(refPath)

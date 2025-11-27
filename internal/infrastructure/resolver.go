@@ -22,9 +22,12 @@ type ReferenceResolver struct {
 	fileCache map[string]interface{}
 	componentHashes map[string]string
 	rootBasePath string
-	refToComponentName map[string]string // Кэш: исходный $ref -> имя компонента
-	componentUsageCount map[string]int // Счетчик использования компонентов по хешу
-	externalRefUsageCount map[string]int // Счетчик использования внешних ссылок (для определения, инлайнить или извлечь)
+	refToComponentName map[string]string
+	componentUsageCount map[string]int
+	externalRefUsageCount map[string]int
+	schemaFileToName map[string]string
+	processingComponentsIndex bool
+	currentComponentName string
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
@@ -47,6 +50,7 @@ func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) do
 		refToComponentName: make(map[string]string),
 		componentUsageCount: make(map[string]int),
 		externalRefUsageCount: make(map[string]int),
+		schemaFileToName: make(map[string]string),
 	}
 }
 
@@ -61,6 +65,7 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 	r.refToComponentName = make(map[string]string)
 	r.componentUsageCount = make(map[string]int)
 	r.externalRefUsageCount = make(map[string]int)
+	r.schemaFileToName = make(map[string]string)
 	for _, ct := range componentTypes {
 		r.components[ct] = make(map[string]interface{})
 		r.componentCounter[ct] = 0
@@ -85,25 +90,39 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 		return err
 	}
 
-	// Предзагружаем все внешние файлы параллельно (только если нет ограничения глубины)
-	// При ограничении глубины предзагрузка может нарушить логику проверки глубины
 	if config.MaxDepth == 0 {
 		if err := r.preloadExternalFiles(ctx, data, basePath, config); err != nil {
 			return fmt.Errorf("failed to preload external files: %w", err)
 		}
 	}
 
-	// ПЕРВЫЙ ПРОХОД: Подсчитываем использование внешних ссылок
 	if err := r.countExternalRefUsage(ctx, data, basePath, config, 0); err != nil {
 		return err
 	}
 
-	// ВТОРОЙ ПРОХОД: Обрабатываем ссылки (инлайним одноразовые, извлекаем многоразовые)
 	if err := r.replaceExternalRefs(ctx, data, basePath, config, 0); err != nil {
 		return err
 	}
 
-	// Объединяем собранные компоненты в финальную секцию с проверкой уникальности
+	for _, ct := range componentTypes {
+		if section, ok := components[ct].(map[string]interface{}); ok {
+			for name, component := range section {
+				if componentMap, ok := component.(map[string]interface{}); ok {
+					if refVal, hasRef := componentMap["$ref"]; hasRef {
+						if len(componentMap) == 1 {
+							if refStr, ok := refVal.(string); ok {
+								expectedRef := "#/components/" + ct + "/" + name
+								if refStr == expectedRef {
+									delete(section, name)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	for _, ct := range componentTypes {
 		if section, ok := components[ct].(map[string]interface{}); ok {
 			for name, component := range r.components[ct] {
@@ -111,28 +130,20 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 					continue
 				}
 				
-				// Нормализуем имя перед добавлением
 				normalizedName := r.normalizeComponentName(name)
 				
-				// Проверяем дедупликацию по хешу
 				componentHash := r.hashComponent(component)
 				
-				// ВАЖНО: Проверяем, не существует ли компонент с таким же содержимым в section под другим именем
-				// Это нужно, чтобы заменить компоненты, которые являются только $ref
 				for existingName, existingComponent := range section {
 					if existingMap, ok := existingComponent.(map[string]interface{}); ok {
 						if refVal, hasRef := existingMap["$ref"]; hasRef {
 							if len(existingMap) == 1 {
-								// Существующий компонент - это только $ref
 								if refStr, ok := refVal.(string); ok {
 									expectedRef := "#/components/" + ct + "/" + existingName
 									if refStr == expectedRef {
-										// Это самоссылка, проверяем, не тот ли это же компонент по содержимому
 										if r.componentsEqual(component, existingComponent) || r.hashComponent(component) == r.hashComponent(existingComponent) {
-											// Заменяем на реальное содержимое
 											section[existingName] = component
 											r.componentHashes[componentHash] = existingName
-											// Удаляем компонент из r.components, если он был добавлен с другим именем
 											if name != existingName {
 												delete(r.components[ct], name)
 											}
@@ -147,49 +158,34 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 				
 				if existingName, exists := r.componentHashes[componentHash]; exists {
 					if existingName != normalizedName {
-						// Компонент с таким же содержимым уже существует под другим именем
-						// Используем существующее имя вместо создания дубликата
 						continue
 					}
 				}
 				
-				// Проверяем уникальность имени перед добавлением
 				if existing, exists := section[normalizedName]; !exists {
-					// Имя уникально, добавляем компонент
 					section[normalizedName] = component
 					r.componentHashes[componentHash] = normalizedName
 				} else {
-					// Имя уже существует
-					// СНАЧАЛА проверяем, не является ли существующий компонент только $ref
 					if existingMap, ok := existing.(map[string]interface{}); ok {
 						if refVal, hasRef := existingMap["$ref"]; hasRef {
 							if len(existingMap) == 1 {
-								// Существующий компонент - это только $ref
-								// Проверяем, не ссылается ли он сам на себя
 								if refStr, ok := refVal.(string); ok {
 									expectedRef := "#/components/" + ct + "/" + normalizedName
 									if refStr == expectedRef {
-										// Это самоссылка (Error: { $ref: '#/components/schemas/Error' })
-										// Заменяем на реальное содержимое
 										section[normalizedName] = component
 										r.componentHashes[componentHash] = normalizedName
 										continue
 									}
 								}
-								// Это ссылка на другой компонент, заменяем на реальное содержимое
 								section[normalizedName] = component
 								r.componentHashes[componentHash] = normalizedName
 								continue
 							}
 						}
 					}
-					// Проверяем, не тот ли это же компонент
 					if r.componentsEqual(existing, component) {
-						// Это тот же компонент, пропускаем
 						continue
 					}
-					// Разные компоненты с одинаковым именем - это конфликт
-					// Используем уникальное имя
 					uniqueName := r.ensureUniqueComponentName(normalizedName, section, ct)
 					section[uniqueName] = component
 					r.componentHashes[componentHash] = uniqueName
@@ -201,6 +197,10 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 
 	if err := r.liftComponentRefs(ctx, data, config); err != nil {
 		return err
+	}
+
+	if err := r.replaceInlineSchemasWithRefs(ctx, data); err != nil {
+		return fmt.Errorf("failed to replace inline schemas with refs: %w", err)
 	}
 
 	r.cleanNilValues(data)

@@ -42,7 +42,7 @@ func TestFileLoader_Load_FileNotFound(t *testing.T) {
 func TestFileLoader_Load_ContextCancelled(t *testing.T) {
 	loader := NewFileLoader()
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately
+	cancel()
 
 	_, err := loader.Load(ctx, "test.yaml")
 	if err == nil {
@@ -62,7 +62,6 @@ func TestFileLoader_Load_RelativePath(t *testing.T) {
 	loader := NewFileLoader()
 	ctx := context.Background()
 
-	// Change to tmpDir to test relative path
 	oldDir, _ := os.Getwd()
 	os.Chdir(tmpDir)
 	defer os.Chdir(oldDir)
@@ -81,7 +80,6 @@ func TestFileLoader_Load_PathTraversal(t *testing.T) {
 	loader := NewFileLoader()
 	ctx := context.Background()
 
-	// Test path traversal protection
 	_, err := loader.Load(ctx, "../../../etc/passwd")
 	if err == nil {
 		t.Error("Load() should protect against path traversal")

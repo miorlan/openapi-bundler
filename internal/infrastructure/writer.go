@@ -14,7 +14,6 @@ func NewFileWriter() domain.FileWriter {
 	return &FileWriter{}
 }
 
-// Write удаляет файл, если data == nil (используется при ошибке валидации)
 func (fw *FileWriter) Write(path string, data []byte) error {
 	if data == nil {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

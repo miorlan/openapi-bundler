@@ -14,7 +14,6 @@ func (r *ReferenceResolver) processCompositionKeywords(ctx context.Context, n ma
 		if array, ok := n[keyword].([]interface{}); ok {
 			for i, item := range array {
 				if itemMap, ok := item.(map[string]interface{}); ok {
-					// Пока просто прокидываем стандартный контекст флагами (false, false)
 					if err := r.replaceExternalRefsWithContext(ctx, itemMap, baseDir, config, depth, false, false); err != nil {
 						return fmt.Errorf("failed to process %s item %d: %w", keyword, i, err)
 					}

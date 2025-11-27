@@ -16,7 +16,7 @@ import (
 
 type FileLoader struct {
 	client *http.Client
-	sem    chan struct{} // семафор для ограничения параллелизма
+	sem    chan struct{}
 }
 
 const defaultMaxConcurrent = 10
@@ -88,7 +88,6 @@ func (fl *FileLoader) loadHTTP(ctx context.Context, url string) ([]byte, error) 
 	return data, nil
 }
 
-// LoadMany загружает несколько файлов параллельно с ограничением через worker pool
 func (fl *FileLoader) LoadMany(ctx context.Context, paths []string) (map[string][]byte, error) {
 	if len(paths) == 0 {
 		return make(map[string][]byte), nil
@@ -104,7 +103,6 @@ func (fl *FileLoader) LoadMany(ctx context.Context, paths []string) (map[string]
 		go func(p string) {
 			defer wg.Done()
 
-			// Захватываем семафор для ограничения параллелизма
 			if fl.sem != nil {
 				select {
 				case fl.sem <- struct{}{}:

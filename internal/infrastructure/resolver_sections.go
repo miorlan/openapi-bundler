@@ -112,11 +112,52 @@ func (r *ReferenceResolver) expandComponentsSections(ctx context.Context, data m
 
 		sectionBaseDir := r.getSectionBaseDir(refPath)
 		r.componentsBaseDir[ct] = sectionBaseDir
-		if err := r.replaceExternalRefs(ctx, sectionMap, sectionBaseDir, config, 0); err != nil {
-			return fmt.Errorf("failed to process references in components.%s section: %w", ct, err)
+		
+		if ct == "schemas" {
+			for schemaName, schemaValue := range sectionMap {
+				if schemaMap, ok := schemaValue.(map[string]interface{}); ok {
+					if refVal, hasRef := schemaMap["$ref"]; hasRef {
+						if refStr, ok := refVal.(string); ok {
+							resolvedRef := r.getRefPath(refStr, sectionBaseDir)
+							if resolvedRef != "" {
+								var normalizedPath string
+								if absPath, err := filepath.Abs(resolvedRef); err == nil {
+									normalizedPath = absPath
+								} else {
+									normalizedPath = resolvedRef
+								}
+								normalizedName := r.normalizeComponentName(schemaName)
+								r.schemaFileToName[normalizedPath] = normalizedName
+								pathWithoutExt := strings.TrimSuffix(normalizedPath, filepath.Ext(normalizedPath))
+								r.schemaFileToName[pathWithoutExt] = normalizedName
+							}
+						}
+					}
+				}
+			}
 		}
-
+		
 		components[ct] = sectionMap
+		
+		if ct == "schemas" {
+			r.processingComponentsIndex = true
+			for schemaName, schemaValue := range sectionMap {
+				if schemaMap, ok := schemaValue.(map[string]interface{}); ok {
+					r.currentComponentName = r.normalizeComponentName(schemaName)
+					if err := r.replaceExternalRefs(ctx, schemaMap, sectionBaseDir, config, 0); err != nil {
+						r.processingComponentsIndex = false
+						r.currentComponentName = ""
+						return fmt.Errorf("failed to process references in component %s: %w", schemaName, err)
+					}
+				}
+			}
+			r.processingComponentsIndex = false
+			r.currentComponentName = ""
+		} else {
+			if err := r.replaceExternalRefs(ctx, sectionMap, sectionBaseDir, config, 0); err != nil {
+				return fmt.Errorf("failed to process references in components.%s section: %w", ct, err)
+			}
+		}
 	}
 
 	return nil

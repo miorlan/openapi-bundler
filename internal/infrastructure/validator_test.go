@@ -38,7 +38,6 @@ func TestValidator_Validate_InvalidFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.yaml")
 
-	// Invalid OpenAPI spec (missing required fields)
 	content := `openapi: 3.0.0
 invalid: structure`
 
@@ -48,7 +47,6 @@ invalid: structure`
 
 	validator := NewValidator()
 	err := validator.Validate(testFile)
-	// kin-openapi may or may not validate structure, so we just check it doesn't panic
 	_ = err
 }
 

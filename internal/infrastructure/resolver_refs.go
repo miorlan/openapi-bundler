@@ -26,23 +26,17 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				if paramMap, ok := param.(map[string]interface{}); ok {
 					if refVal, hasRef := paramMap["$ref"]; hasRef {
 						if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
-							// Это внешняя ссылка на параметр
-							// Создаём компонент в components.parameters, но оставляем $ref в массиве
 							internalRef, err := r.resolveAndReplaceExternalRefWithType(ctx, refStr, baseDir, config, depth, "parameters", false)
 							if err == nil && internalRef != "" {
-								// Заменяем элемент массива на только $ref
 								paramsArray[i] = map[string]interface{}{
 									"$ref": internalRef,
 								}
 								continue
 							}
 						} else if refStr, ok := refVal.(string); ok && strings.HasPrefix(refStr, "#/components/parameters/") {
-							// Это уже внутренняя ссылка на параметр - не обрабатываем дальше
 							continue
 						}
 					} else {
-						// Параметр развернут (без $ref) - извлекаем в компоненты
-						// Определяем имя параметра
 						paramName := ""
 						if nameVal, hasName := paramMap["name"]; hasName {
 							if nameStr, ok := nameVal.(string); ok {
@@ -55,19 +49,15 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 						
 						componentHash := r.hashComponent(paramMap)
 						
-						// Проверяем, не существует ли уже компонент с таким же содержимым
 						if existingName, exists := r.componentHashes[componentHash]; exists {
-							// Используем существующее имя
 							paramsArray[i] = map[string]interface{}{
 								"$ref": "#/components/parameters/" + existingName,
 							}
 						} else {
-							// Создаём новый компонент
 							paramName = r.ensureUniqueComponentName(paramName, r.components["parameters"], "parameters")
 							r.components["parameters"][paramName] = r.deepCopy(paramMap)
 							r.componentHashes[componentHash] = paramName
 							r.componentUsageCount[componentHash]++
-							// Заменяем параметр на $ref
 							paramsArray[i] = map[string]interface{}{
 								"$ref": "#/components/parameters/" + paramName,
 							}
@@ -185,25 +175,112 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				return nil
 			}
 
-			expanded, err := r.expandExternalRefInline(ctx, refStr, baseDir, config, depth)
-			if err != nil {
-				expandedPath, expandErr := r.expandPathRef(ctx, refStr, baseDir, config, depth)
-				if expandErr == nil && expandedPath != nil {
-					for k, v := range expandedPath {
-						n[k] = v
-					}
-					delete(n, "$ref")
-					return nil
+			resolvedPath := r.getRefPath(refPath, baseDir)
+			if resolvedPath != "" {
+				var normalizedPath string
+				if absPath, err := filepath.Abs(resolvedPath); err == nil {
+					normalizedPath = absPath
+				} else {
+					normalizedPath = resolvedPath
 				}
-				return fmt.Errorf("failed to inline external ref %s: %w", refStr, err)
+				
+				var schemaName string
+				var exists bool
+				
+				if schemaName, exists = r.schemaFileToName[normalizedPath]; !exists {
+					pathWithoutExt := strings.TrimSuffix(normalizedPath, filepath.Ext(normalizedPath))
+					schemaName, exists = r.schemaFileToName[pathWithoutExt]
+				}
+				
+				if !exists && strings.Contains(normalizedPath, "schemas") {
+					fileName := filepath.Base(normalizedPath)
+					fileNameWithoutExt := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+					normalizedFileName := r.normalizeComponentName(fileNameWithoutExt)
+					
+					for filePath, compName := range r.schemaFileToName {
+						basePath := filepath.Base(filePath)
+						if basePath == fileName || basePath == fileNameWithoutExt {
+							schemaName = compName
+							exists = true
+							break
+						}
+					}
+					
+					if !exists {
+						if components, ok := r.rootDoc["components"].(map[string]interface{}); ok {
+							if schemasVal, ok := components["schemas"]; ok {
+								if schemas, ok := schemasVal.(map[string]interface{}); ok {
+									if _, componentExists := schemas[normalizedFileName]; componentExists {
+										schemaName = normalizedFileName
+										exists = true
+									} else {
+										for compName := range schemas {
+											normalizedCompName := r.normalizeComponentName(compName)
+											if normalizedCompName == normalizedFileName {
+												schemaName = compName
+												exists = true
+												break
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+					
+					if !exists {
+						if schemas, ok := r.components["schemas"]; ok {
+							if _, componentExists := schemas[normalizedFileName]; componentExists {
+								schemaName = normalizedFileName
+								exists = true
+							} else {
+								for compName := range schemas {
+									normalizedCompName := r.normalizeComponentName(compName)
+									if normalizedCompName == normalizedFileName {
+										schemaName = compName
+										exists = true
+										break
+									}
+								}
+							}
+						}
+					}
+				}
+				
+				if exists {
+					if r.processingComponentsIndex && r.currentComponentName != "" {
+						if schemaName == r.currentComponentName {
+						} else {
+							n["$ref"] = "#/components/schemas/" + schemaName
+							return nil
+						}
+					} else {
+						n["$ref"] = "#/components/schemas/" + schemaName
+						return nil
+					}
+				}
 			}
 
-			for k, v := range expanded {
-				n[k] = v
+			expandedPath, expandErr := r.expandPathRef(ctx, refStr, baseDir, config, depth)
+			if expandErr == nil && expandedPath != nil {
+				for k, v := range expandedPath {
+					n[k] = v
+				}
+				delete(n, "$ref")
+				return nil
 			}
-			delete(n, "$ref")
-
-			return nil
+			
+			componentRef, err := r.resolveAndReplaceExternalRefWithType(ctx, refStr, baseDir, config, depth, "schemas", false)
+			if err != nil {
+				return fmt.Errorf("failed to resolve external ref %s: %w", refStr, err)
+			}
+			
+			if componentRef != "" {
+				n["$ref"] = componentRef
+				return nil
+			}
+			
+			return fmt.Errorf("failed to resolve external ref %s: no component created", refStr)
 		}
 
 		for k, v := range n {
@@ -263,7 +340,6 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 								}
 								if componentStr, ok := component.(string); ok {
 									if !strings.HasPrefix(componentStr, "#") {
-										// Внешняя ссылка - разрешаем и заменяем на внутреннюю
 										internalRef, err := r.resolveAndReplaceExternalRefWithContext(ctx, componentStr, componentBaseDir, config, depth, false)
 										if err == nil && internalRef != "" {
 											section[name] = map[string]interface{}{
@@ -275,7 +351,6 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 									}
 								}
 								if componentMap, ok := component.(map[string]interface{}); ok {
-									// Обрабатываем компонент (внутренние $ref будут "подняты" позже в liftComponentRefs)
 									if err := r.replaceExternalRefsWithContext(ctx, componentMap, componentBaseDir, config, depth, false, false); err != nil {
 										return fmt.Errorf("failed to process component %s/%s: %w", ct, name, err)
 									}
@@ -293,36 +368,27 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 		}
 
 	case []interface{}:
-		// Специальная обработка для массивов параметров
-		// Параметры должны оставаться как $ref, а не разворачиваться
 		for i, item := range n {
 			if itemMap, ok := item.(map[string]interface{}); ok {
-				// Проверяем, является ли это параметром с внешней ссылкой
 				if refVal, hasRef := itemMap["$ref"]; hasRef {
 					if refStr, ok := refVal.(string); ok && !strings.HasPrefix(refStr, "#") {
-						// Это внешняя ссылка на параметр
-						// Создаём компонент в components.parameters, но оставляем $ref в массиве
 						internalRef, err := r.resolveAndReplaceExternalRefWithContext(ctx, refStr, baseDir, config, depth, false)
 						if err == nil && internalRef != "" {
-							// Заменяем элемент массива на только $ref
 							n[i] = map[string]interface{}{
 								"$ref": internalRef,
 							}
 							continue
 						}
 					} else if refStr, ok := refVal.(string); ok && strings.HasPrefix(refStr, "#/components/parameters/") {
-						// Это уже внутренняя ссылка на параметр - не обрабатываем дальше
 						continue
 					}
 				}
-				// Если элемент содержит только $ref (внутреннюю), не обрабатываем рекурсивно
 				if len(itemMap) == 1 {
 					if _, hasRef := itemMap["$ref"]; hasRef {
 						continue
 					}
 				}
 			}
-			// Для остальных элементов массива обрабатываем рекурсивно
 			if err := r.replaceExternalRefsWithContext(ctx, item, baseDir, config, depth, false, false); err != nil {
 				return fmt.Errorf("failed to process array item %d: %w", i, err)
 			}
@@ -358,7 +424,6 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 	visitedKey := refPath + fragment
 	if r.visited[visitedKey] {
 		if internalRef, ok := r.componentRefs[visitedKey]; ok {
-			// Если skipExtraction = true, не возвращаем internalRef, чтобы не создавать компонент
 			if skipExtraction {
 				return "", nil
 			}
@@ -367,7 +432,6 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 		return "", &domain.ErrCircularReference{Path: visitedKey}
 	}
 	
-	// Если skipExtraction = true, не помечаем как посещенный, чтобы не создавать компонент
 	if !skipExtraction {
 		r.visited[visitedKey] = true
 		defer delete(r.visited, visitedKey)
@@ -403,7 +467,6 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 			componentType = parts[1]
 		}
 	} else {
-		// Нет фрагмента - пытаемся извлечь компонент из файла
 		if contentMap, ok := content.(map[string]interface{}); ok {
 			if comps, ok := contentMap["components"].(map[string]interface{}); ok {
 				totalComponents := 0
@@ -414,7 +477,6 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 					if section, ok := comps[ct].(map[string]interface{}); ok {
 						totalComponents += len(section)
 						if len(section) == 1 {
-							// Если только один компонент, извлекаем его имя
 							for name, comp := range section {
 								foundComponent = comp
 								foundComponentName = name
@@ -427,9 +489,7 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 				if totalComponents == 1 && foundComponent != nil {
 					componentContent = foundComponent
 					componentType = foundType
-					// Используем имя компонента из файла
 					if foundComponentName != "" {
-						// Сохраняем имя в кэш сразу
 						originalRef := ref
 						if r.refToComponentName[originalRef] == "" {
 							r.refToComponentName[originalRef] = r.normalizeComponentName(foundComponentName)
@@ -441,31 +501,39 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 					return "", fmt.Errorf("external file does not contain components: %s", ref)
 				}
 			} else {
-				// Файл содержит компонент напрямую (не в components)
-				// Проверяем тип компонента по содержимому или используем preferredComponentType
+				if _, hasGet := contentMap["get"]; hasGet {
+					return "", fmt.Errorf("external file contains path definition, not a component: %s", ref)
+				}
+				if _, hasPost := contentMap["post"]; hasPost {
+					return "", fmt.Errorf("external file contains path definition, not a component: %s", ref)
+				}
+				if _, hasPut := contentMap["put"]; hasPut {
+					return "", fmt.Errorf("external file contains path definition, not a component: %s", ref)
+				}
+				if _, hasDelete := contentMap["delete"]; hasDelete {
+					return "", fmt.Errorf("external file contains path definition, not a component: %s", ref)
+				}
+				if _, hasPatch := contentMap["patch"]; hasPatch {
+					return "", fmt.Errorf("external file contains path definition, not a component: %s", ref)
+				}
 				if preferredComponentType != "" {
-					// Используем предпочтительный тип (например, "parameters")
 					componentContent = contentMap
 					componentType = preferredComponentType
 				} else if _, hasType := contentMap["type"]; hasType {
-					// Это схема
 					componentContent = contentMap
 					componentType = "schemas"
 				} else if _, hasIn := contentMap["in"]; hasIn {
-					// Это параметр (имеет поле "in")
 					componentContent = contentMap
 					componentType = "parameters"
 				} else {
 					return "", fmt.Errorf("external file does not contain components section or schema: %s", ref)
 				}
-				// Имя будет определено из имени файла в getPreferredComponentName
 			}
 		} else {
 			return "", fmt.Errorf("external file content is not a map: %s", ref)
 		}
 	}
 
-	// Проверяем кэш по $ref
 	originalRef := ref
 	if fragment != "" {
 		originalRef = ref + fragment
@@ -474,14 +542,12 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 	var componentName string
 	var foundComponentName string
 	
-	// Если компонент был извлечён из файла без фрагмента, используем его имя из файла
 	if fragment == "" {
 		if contentMap, ok := content.(map[string]interface{}); ok {
 			if comps, ok := contentMap["components"].(map[string]interface{}); ok {
 				for _, ct := range componentTypes {
 					if section, ok := comps[ct].(map[string]interface{}); ok {
 						if len(section) == 1 {
-							// Извлекаем имя компонента из файла
 							for name := range section {
 								foundComponentName = name
 								break
@@ -494,38 +560,27 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 	}
 	
 	if cachedName, exists := r.refToComponentName[originalRef]; exists && cachedName != "" {
-		// Используем имя из кэша
 		componentName = cachedName
 	} else if foundComponentName != "" {
-		// ПРИОРИТЕТ: Используем имя компонента из файла (например, ChangePasswordRequest из файла)
 		componentName = r.normalizeComponentName(foundComponentName)
 		r.refToComponentName[originalRef] = componentName
 	} else if fragment != "" {
-		// Если есть фрагмент, используем имя из фрагмента
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
 		if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
 			componentName = r.normalizeComponentName(parts[2])
 			r.refToComponentName[originalRef] = componentName
 		} else {
-			// Вычисляем имя по стратегии
 			componentName = r.getPreferredComponentName(ref, fragment, componentType, componentContent)
 			r.refToComponentName[originalRef] = componentName
 		}
 	} else {
-		// Вычисляем имя по стратегии (имя файла, title и т.д.)
 		componentName = r.getPreferredComponentName(ref, fragment, componentType, componentContent)
-		// Сохраняем в кэш
 		r.refToComponentName[originalRef] = componentName
 	}
 	
-	// Если skipExtraction = true, не извлекаем компонент в components
-	// Это используется для inline схем в content (responses, requestBody)
 	if skipExtraction {
-		// Возвращаем пустую строку, чтобы не создавать компонент
-		// Но все равно обрабатываем вложенные ссылки в компоненте
 		if componentContent != nil {
 			if componentMap, ok := componentContent.(map[string]interface{}); ok {
-				// Обрабатываем вложенные ссылки, но не извлекаем компонент
 				if err := r.replaceExternalRefsWithContext(ctx, componentMap, nextBaseDir, config, depth+1, false, false); err != nil {
 					return "", fmt.Errorf("failed to process component content: %w", err)
 				}
@@ -551,7 +606,6 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 		}
 	}
 
-	// Проверяем, не был ли уже обработан этот компонент
 	if existingRef, ok := r.componentRefs[visitedKey]; ok {
 		return existingRef, nil
 	}
@@ -561,35 +615,26 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 		return "", fmt.Errorf("component copy is nil for ref: %s", ref)
 	}
 	
-	// Обрабатываем компонент (разрешаем вложенные ссылки)
 	if err := r.replaceExternalRefsWithContext(ctx, componentCopy, nextBaseDir, config, depth+1, false, false); err != nil {
 		return "", fmt.Errorf("failed to process component: %w", err)
 	}
 
-	// Проверяем дедупликацию по хешу ПЕРЕД выбором имени
 	componentHash := r.hashComponent(componentCopy)
 	
-	// Увеличиваем счетчик использования компонента
 	r.componentUsageCount[componentHash]++
 	
-	// Если компонент с таким же содержимым уже существует, используем его имя
 	if existingName, exists := r.componentHashes[componentHash]; exists {
-		// Проверяем, что компонент действительно существует
 		if existingComponent, ok := r.components[componentType][existingName]; ok {
 			if r.componentsEqual(existingComponent, componentCopy) {
-				// Компонент уже существует, используем существующую ссылку
 				internalRef := "#/components/" + componentType + "/" + existingName
 				r.componentRefs[visitedKey] = internalRef
 				return internalRef, nil
 			}
 		}
-		// Также проверяем в финальной секции
 		if existingComponent, ok := section[existingName]; ok {
-			// Если существующий компонент является только $ref, заменяем его
 			if existingMap, ok := existingComponent.(map[string]interface{}); ok {
 				if _, hasRef := existingMap["$ref"]; hasRef {
 					if len(existingMap) == 1 {
-						// Существующий компонент - это только $ref, заменяем на реальное содержимое
 						section[existingName] = componentCopy
 						r.components[componentType][existingName] = componentCopy
 						r.componentHashes[componentHash] = existingName
@@ -607,14 +652,12 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 		}
 	}
 
-	// Проверяем, не создаём ли мы самоссылку
 	if fragment != "" {
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
 		if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
 			originalName := parts[2]
 			normalizedOriginalName := r.normalizeComponentName(originalName)
 			if normalizedOriginalName == componentName {
-				// Проверяем, не ссылается ли компонент сам на себя
 				if componentMap, ok := componentCopy.(map[string]interface{}); ok {
 					if refVal, hasRef := componentMap["$ref"]; hasRef {
 						if refStr, ok := refVal.(string); ok {
@@ -631,23 +674,14 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 		}
 	}
 
-	// ВАЖНО: Проверяем, существует ли компонент с таким именем в секции ПЕРЕД вызовом ensureUniqueComponentName
-	// Это нужно, чтобы заменить компоненты, которые являются только $ref
 	if existingComponent, exists := section[componentName]; exists {
-		// Компонент уже существует в секции
-		// Проверяем, не является ли существующий компонент только $ref
 		if existingMap, ok := existingComponent.(map[string]interface{}); ok {
 			if refVal, hasRef := existingMap["$ref"]; hasRef {
 				if len(existingMap) == 1 {
-					// Существующий компонент - это только $ref
-					// Проверяем, не ссылается ли он сам на себя
 					if refStr, ok := refVal.(string); ok {
 						expectedRef := "#/components/" + componentType + "/" + componentName
 						if refStr == expectedRef {
-							// Это самоссылка (Error: { $ref: '#/components/schemas/Error' })
-							// Заменяем на реальное содержимое в секции и в собранных компонентах
 							section[componentName] = componentCopy
-							// Удаляем компонент из r.components, если он был добавлен с другим именем
 							for name, comp := range r.components[componentType] {
 								if r.componentsEqual(comp, componentCopy) && name != componentName {
 									delete(r.components[componentType], name)
@@ -661,9 +695,7 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 							return internalRef, nil
 						}
 					}
-					// Это ссылка на другой компонент, заменяем на реальное содержимое
 					section[componentName] = componentCopy
-					// Удаляем компонент из r.components, если он был добавлен с другим именем
 					for name, comp := range r.components[componentType] {
 						if r.componentsEqual(comp, componentCopy) && name != componentName {
 							delete(r.components[componentType], name)
@@ -679,33 +711,25 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 			}
 		}
 		
-		// Проверяем, не тот ли это же компонент
 		if r.componentsEqual(existingComponent, componentCopy) {
-			// Это тот же компонент, используем существующее имя
 			internalRef := "#/components/" + componentType + "/" + componentName
 			r.componentRefs[visitedKey] = internalRef
 			return internalRef, nil
 		}
 		
-		// Разные компоненты с одинаковым именем - используем уникальное имя
-		// НО только если существующий компонент НЕ является только $ref
 		componentName = r.ensureUniqueComponentName(componentName, section, componentType)
 		
-		// Обновляем кэш, если имя изменилось из-за конфликта
 		if componentName != r.refToComponentName[originalRef] {
 			r.refToComponentName[originalRef] = componentName
 		}
 	} else {
-		// Компонент не существует в секции, проверяем уникальность имени
 		componentName = r.ensureUniqueComponentName(componentName, section, componentType)
 		
-		// Обновляем кэш, если имя изменилось из-за конфликта
 		if componentName != r.refToComponentName[originalRef] {
 			r.refToComponentName[originalRef] = componentName
 		}
 	}
 
-	// Добавляем компонент в r.components только если его еще нет и если skipExtraction = false
 	if !skipExtraction {
 		if _, existsInCollected := r.components[componentType][componentName]; !existsInCollected {
 			r.components[componentType][componentName] = componentCopy
@@ -718,7 +742,6 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 		return internalRef, nil
 	}
 
-	// Если skipExtraction = true, возвращаем пустую строку, чтобы не создавать компонент
 	return "", nil
 }
 
@@ -816,7 +839,6 @@ func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref str
 		}
 		componentContent = extracted
 	} else {
-		// Нет фрагмента - файл содержит схему напрямую
 		if contentMap, ok := content.(map[string]interface{}); ok {
 			componentContent = contentMap
 		} else {
@@ -824,7 +846,6 @@ func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref str
 		}
 	}
 
-	// Копируем содержимое для inline-замены
 	componentCopy := r.deepCopy(componentContent)
 	if componentCopy == nil {
 		return nil, fmt.Errorf("component copy is nil for ref: %s", ref)
@@ -848,16 +869,13 @@ func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref str
 	return nil, fmt.Errorf("component content is not a map: %s", ref)
 }
 
-// inlineSingleUseComponents заменяет $ref на inline содержимое для компонентов, используемых только один раз
-// Исключает компоненты, используемые внутри других схем (в properties, items и т.д.)
 func (r *ReferenceResolver) inlineSingleUseComponents(ctx context.Context, data map[string]interface{}) error {
 	components, ok := data["components"].(map[string]interface{})
 	if !ok {
 		return nil
 	}
 
-	// Собираем компоненты, которые используются только один раз
-	singleUseComponents := make(map[string]string) // componentRef -> componentHash
+	singleUseComponents := make(map[string]string)
 	for _, ct := range componentTypes {
 		section, ok := components[ct].(map[string]interface{})
 		if !ok {
@@ -876,32 +894,24 @@ func (r *ReferenceResolver) inlineSingleUseComponents(ctx context.Context, data 
 		return nil
 	}
 
-	// Заменяем $ref на inline содержимое для компонентов, используемых только один раз
-	// Исключаем компоненты, используемые внутри других схем (в properties, items и т.д.)
-	// Исключаем компоненты, используемые в responses.content.application/json.schema
 	return r.replaceRefsWithInline(ctx, data, singleUseComponents, components, false, false)
 }
 
-// replaceRefsWithInline заменяет $ref на inline содержимое в документе
-// Отключено - все схемы и параметры остаются как $ref в components
 func (r *ReferenceResolver) replaceRefsWithInline(ctx context.Context, node interface{}, singleUseComponents map[string]string, components map[string]interface{}, skipNested bool, inContentSchema bool) error {
-	// Не инлайним компоненты - все схемы и параметры остаются как $ref
 	return nil
 }
 
-// liftComponentRefs "поднимает" $ref в components: заменяет ссылки на реальное содержимое
 func (r *ReferenceResolver) liftComponentRefs(ctx context.Context, data map[string]interface{}, config domain.Config) error {
 	components, ok := data["components"].(map[string]interface{})
 	if !ok {
 		return nil
 	}
 
-	// Функция для проверки циклических ссылок
 	var checkCycle func(currentType string, section map[string]interface{}, startName string, visited map[string]bool) bool
 	checkCycle = func(currentType string, section map[string]interface{}, startName string, visited map[string]bool) bool {
 		key := currentType + "/" + startName
 		if visited[key] {
-			return true // Цикл обнаружен
+			return true
 		}
 		visited[key] = true
 		defer delete(visited, key)
@@ -930,45 +940,39 @@ func (r *ReferenceResolver) liftComponentRefs(ctx context.Context, data map[stri
 		return false
 	}
 
-	// Проходим по всем типам компонентов
 	for _, ct := range componentTypes {
+		if ct == "schemas" {
+			continue
+		}
+		
 		section, ok := components[ct].(map[string]interface{})
 		if !ok {
 			continue
 		}
 
-		// Собираем список компонентов для "поднятия" (чтобы не изменять map во время итерации)
-		toLift := make(map[string]string) // name -> refName
+		toLift := make(map[string]string)
 		
 		for name, component := range section {
 			if componentMap, ok := component.(map[string]interface{}); ok {
-				// Проверяем, является ли компонент только $ref
 				if refVal, hasRef := componentMap["$ref"]; hasRef {
 					if len(componentMap) == 1 {
 						if refStr, ok := refVal.(string); ok {
 							if strings.HasPrefix(refStr, "#/components/"+ct+"/") {
-								// Внутренняя ссылка на компонент того же типа
 								refName := strings.TrimPrefix(refStr, "#/components/"+ct+"/")
 								
-								// Проверка на самоссылку
 								if refName == name {
 									continue
 								}
 
-								// Проверка на циклическую ссылку
 								visited := make(map[string]bool)
 								if checkCycle(ct, section, refName, visited) {
-									// Цикл обнаружен, не поднимаем
 									continue
 								}
 
-								// Проверяем, что целевой компонент существует
 								if targetComponent, exists := section[refName]; exists {
-									// Проверяем, что целевой компонент не является только $ref (чтобы избежать цепочки)
 									if targetMap, ok := targetComponent.(map[string]interface{}); ok {
 										if _, hasTargetRef := targetMap["$ref"]; hasTargetRef {
 											if len(targetMap) == 1 {
-												// Целевой компонент тоже только $ref - не поднимаем, чтобы избежать цепочек
 												continue
 											}
 										}
@@ -982,15 +986,11 @@ func (r *ReferenceResolver) liftComponentRefs(ctx context.Context, data map[stri
 			}
 		}
 
-		// Выполняем "поднятие"
 		for name, refName := range toLift {
 			if targetComponent, exists := section[refName]; exists {
-				// Проверяем, не является ли это самоссылкой
 				if name == refName {
-					// Это самоссылка, не поднимаем
 					continue
 				}
-				// "Поднимаем" ссылку: заменяем на содержимое
 				targetCopy := r.deepCopy(targetComponent)
 				section[name] = targetCopy
 			}

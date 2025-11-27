@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,8 +53,6 @@ func (r *ReferenceResolver) getRefPath(ref string, baseDir string) string {
 	return filepath.Clean(result)
 }
 
-// normalizeRefPathForCount нормализует путь для подсчета использований
-// Использует абсолютный путь для консистентности между подсчетом и обработкой
 func (r *ReferenceResolver) normalizeRefPathForCount(refPath string) string {
 	if refPath == "" {
 		return ""
@@ -63,10 +62,8 @@ func (r *ReferenceResolver) normalizeRefPathForCount(refPath string) string {
 		return refPath
 	}
 	
-	// Очищаем путь
 	refPath = filepath.Clean(refPath)
 	
-	// Делаем абсолютный путь для консистентности
 	if absPath, err := filepath.Abs(refPath); err == nil {
 		return absPath
 	}
@@ -132,15 +129,11 @@ func (r *ReferenceResolver) deepCopy(src interface{}) interface{} {
 	}
 }
 
-// normalizeComponentName нормализует имя компонента: убирает специальные символы, приводит к валидному формату
 func (r *ReferenceResolver) normalizeComponentName(name string) string {
 	if name == "" {
 		return name
 	}
 	
-	// Убираем префиксы типа ".._.._schemas_" или "schemas_" из начала имени
-	// Это остатки от старой логики построения имён из путей
-	// Убираем все повторяющиеся префиксы ".._" или "../"
 	for strings.HasPrefix(name, ".._") {
 		name = strings.TrimPrefix(name, ".._")
 	}
@@ -148,11 +141,8 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 		name = strings.TrimPrefix(name, "../")
 	}
 	
-	// Убираем префиксы типа "schemas_", "responses_" и т.д.
-	// НО НЕ удаляем префикс "Inline_", так как это наш собственный префикс
 	hasInlinePrefix := strings.HasPrefix(name, "Inline_")
 	if !hasInlinePrefix {
-		// Удаляем префиксы типов компонентов только если нет "Inline_" в начале
 		for _, ct := range componentTypes {
 			prefix := ct + "_"
 			for strings.HasPrefix(name, prefix) {
@@ -161,8 +151,6 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 		}
 	}
 	
-	// Убираем специальные символы, оставляем только буквы, цифры, подчёркивания и дефисы
-	// Дефисы сохраняем, так как они часто используются в именах параметров (например, X-Device-Id)
 	result := builderPool.Get().(*strings.Builder)
 	defer func() {
 		result.Reset()
@@ -172,7 +160,6 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' || char == '-' {
 			result.WriteRune(char)
 		} else {
-			// Заменяем все остальные символы на подчёркивание, но не добавляем подряд
 			if result.Len() > 0 {
 				lastChar := result.String()[result.Len()-1]
 				if lastChar != '_' && lastChar != '-' {
@@ -184,20 +171,16 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 	
 	normalized := result.String()
 	
-	// Убираем множественные подчёркивания (но не дефисы)
 	for strings.Contains(normalized, "__") {
 		normalized = strings.ReplaceAll(normalized, "__", "_")
 	}
 	
-	// Убираем подчёркивания в начале и конце (но не дефисы)
 	normalized = strings.Trim(normalized, "_")
 	
-	// Если имя пустое после нормализации, используем fallback
 	if normalized == "" {
 		return "Component"
 	}
 	
-	// Первый символ должен быть буквой (не цифрой и не подчёркиванием)
 	if len(normalized) > 0 {
 		first := normalized[0]
 		if (first >= '0' && first <= '9') || first == '_' {
@@ -208,19 +191,12 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 	return normalized
 }
 
-// getPreferredComponentName определяет имя компонента по стратегии:
-// 1. Если $ref указывает на файл (./schemas/EmployeeFullInfo.yaml) → использовать имя файла
-// 2. Если $ref указывает на #/components/schemas/FooBar → использовать FooBar
-// 3. Если создаётся из inline-схемы с title → использовать title
-// 4. Иначе → Inline_<path>_...
 func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentType string, componentContent interface{}) string {
 	var name string
 	
-	// 1. Если есть фрагмент с компонентом (#/components/schemas/FooBar) → используем имя из фрагмента
 	if fragment != "" {
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
 		if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
-			// Используем оригинальное имя схемы из фрагмента
 			name = parts[2]
 			return r.normalizeComponentName(name)
 		} else if len(parts) >= 1 {
@@ -229,23 +205,18 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 		}
 	}
 	
-	// 2. Если $ref указывает на файл → используем имя файла
 	refPath := strings.Split(ref, "#")[0]
 	if refPath != "" && refPath != "." && refPath != "./" {
-		// Извлекаем имя файла без расширения
 		baseName := filepath.Base(refPath)
 		ext := filepath.Ext(baseName)
 		if ext != "" {
 			baseName = strings.TrimSuffix(baseName, ext)
 		}
-		// Проверяем, что это реальное имя файла, а не просто точка или путь
 		if baseName != "" && baseName != "." && baseName != ".." {
-			// Используем имя файла как есть, только нормализуем специальные символы
 			return r.normalizeComponentName(baseName)
 		}
 	}
 	
-	// 3. Если это inline-схема с title → используем title
 	if componentContent != nil {
 		if schemaMap, ok := componentContent.(map[string]interface{}); ok {
 			if title, hasTitle := schemaMap["title"]; hasTitle {
@@ -256,9 +227,7 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 		}
 	}
 	
-	// 4. Fallback: Генерируем имя на основе пути (Inline_<path>_...)
 	if refPath != "" {
-		// Создаём имя на основе пути к файлу
 		pathParts := strings.Split(strings.Trim(refPath, "./"), "/")
 		pathName := builderPool.Get().(*strings.Builder)
 		defer func() {
@@ -277,16 +246,11 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 		}
 	}
 	
-	// Последний резерв: генерируем имя на основе контекста
-	// НЕ используем счётчик (SchemaN), а используем путь или тип
 	if componentContent != nil {
-		// Пытаемся создать имя на основе структуры содержимого
 		if schemaMap, ok := componentContent.(map[string]interface{}); ok {
-			// Если есть type, используем его
 			if schemaType, hasType := schemaMap["type"]; hasType {
 				if typeStr, ok := schemaType.(string); ok {
-					typeName := strings.Title(typeStr) // object -> Object, array -> Array
-					// Используем путь, если он есть, иначе только тип
+					typeName := strings.Title(typeStr)
 					if refPath != "" {
 						pathParts := strings.Split(strings.Trim(refPath, "./"), "/")
 						pathName := builderPool.Get().(*strings.Builder)
@@ -318,7 +282,6 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 		}
 	}
 	
-	// Самый последний резерв: используем путь из ref, если он есть
 	if refPath != "" {
 		pathParts := strings.Split(strings.Trim(refPath, "./"), "/")
 		pathName := builderPool.Get().(*strings.Builder)
@@ -337,10 +300,9 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 		return r.normalizeComponentName(pathName.String())
 	}
 	
-	// Абсолютно последний резерв: используем тип компонента без счётчика
-	baseName := componentType[:len(componentType)-1] // schemas -> schema
+	baseName := componentType[:len(componentType)-1]
 	if len(baseName) > 0 {
-		baseName = strings.Title(baseName) // schema -> Schema
+		baseName = strings.Title(baseName)
 	}
 	b := builderPool.Get().(*strings.Builder)
 	defer func() {
@@ -358,14 +320,12 @@ func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, sect
 	counter := 0
 	
 	for {
-		// Проверяем уникальность в финальной секции и в собранных компонентах
 		if _, exists := section[name]; !exists {
 			if _, existsInCollected := r.components[componentType][name]; !existsInCollected {
 				return name
 			}
 		}
 		counter++
-		// Добавляем число к имени, сохраняя префикс Inline_ если он есть
 		b := builderPool.Get().(*strings.Builder)
 		defer func() {
 			b.Reset()
@@ -378,7 +338,6 @@ func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, sect
 			b.WriteString(baseName)
 			b.WriteString(strconv.Itoa(counter))
 		} else {
-			// Для реальных имён (RequestGuests, ExistingGuest и т.д.) просто добавляем число
 			b.Grow(len(preferredName) + 10)
 			b.WriteString(preferredName)
 			b.WriteString(strconv.Itoa(counter))
@@ -387,59 +346,25 @@ func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, sect
 	}
 }
 
-// isSimpleSchema проверяет, является ли схема простой (не должна извлекаться в компоненты)
-// Простые схемы - это схемы с базовыми типами без сложных структур
 func (r *ReferenceResolver) isSimpleSchema(schema map[string]interface{}) bool {
 	if schema == nil {
 		return false
 	}
 	
-	// Если есть $ref, это не простая схема
 	if _, hasRef := schema["$ref"]; hasRef {
 		return false
 	}
 	
-	// Получаем тип схемы
 	schemaType, hasType := schema["type"].(string)
 	if !hasType {
-		// Если нет типа, но есть другие специфичные поля OpenAPI, это не простая схема
-		if _, hasProperties := schema["properties"]; hasProperties {
-			return false
-		}
-		if _, hasItems := schema["items"]; hasItems {
-			return false
-		}
-		if _, hasAllOf := schema["allOf"]; hasAllOf {
-			return false
-		}
-		if _, hasOneOf := schema["oneOf"]; hasOneOf {
-			return false
-		}
-		if _, hasAnyOf := schema["anyOf"]; hasAnyOf {
-			return false
-		}
-		// Если нет типа и нет сложных структур, считаем простой
-		return true
+		return false
 	}
 	
-	// Проверяем количество полей (исключая стандартные поля простых типов)
 	allowedSimpleFields := map[string]bool{
-		"type":        true,
-		"format":       true,
-		"example":      true,
-		"default":      true,
-		"enum":         true,
-		"description":  true,
-		"minLength":    true,
-		"maxLength":    true,
-		"minimum":      true,
-		"maximum":      true,
-		"pattern":      true,
-		"nullable":     true,
-		"deprecated":   true,
+		"type":   true,
+		"format": true,
 	}
 	
-	// Для простых типов (string, integer, number, boolean) считаем простой, если только стандартные поля
 	if schemaType == "string" || schemaType == "integer" || schemaType == "number" || schemaType == "boolean" {
 		for key := range schema {
 			if !allowedSimpleFields[key] {
@@ -449,49 +374,7 @@ func (r *ReferenceResolver) isSimpleSchema(schema map[string]interface{}) bool {
 		return true
 	}
 	
-	// Для массива проверяем, простой ли тип элементов
-	if schemaType == "array" {
-		if items, hasItems := schema["items"].(map[string]interface{}); hasItems {
-			// Если элементы массива - простые, то и массив простой
-			return r.isSimpleSchema(items)
-		}
-		// Если items - это $ref, массив не простой
-		if items, hasItems := schema["items"]; hasItems {
-			if itemsMap, ok := items.(map[string]interface{}); ok {
-				if _, hasRef := itemsMap["$ref"]; hasRef {
-					return false
-				}
-			}
-		}
-		// Если items не указан или простой, массив простой
-		return true
-	}
-	
-	// Для object - всегда не простая (даже если пустая)
-	if schemaType == "object" {
-		// Проверяем, есть ли properties
-		if properties, hasProperties := schema["properties"].(map[string]interface{}); hasProperties {
-			// Если properties пустые или содержат только простые типы, это может быть простой
-			if len(properties) == 0 {
-				return true
-			}
-			// Если есть хотя бы одно свойство, это не простая схема
-			return false
-		}
-		// Если нет properties, но есть другие поля, это не простая схема
-		if len(schema) > 1 {
-			return false
-		}
-		return true
-	}
-	
-	// Для остальных типов считаем простой, если только стандартные поля
-	for key := range schema {
-		if !allowedSimpleFields[key] {
-			return false
-		}
-	}
-	return true
+	return false
 }
 
 func (r *ReferenceResolver) hashComponent(component interface{}) string {
@@ -500,6 +383,10 @@ func (r *ReferenceResolver) hashComponent(component interface{}) string {
 	if err != nil {
 		return ""
 	}
+	var unmarshaled interface{}
+	if err := json.Unmarshal(data, &unmarshaled); err == nil {
+		data, _ = json.Marshal(unmarshaled)
+	}
 	hash := sha256.Sum256(data)
 	return fmt.Sprintf("%x", hash)
 }
@@ -507,18 +394,46 @@ func (r *ReferenceResolver) hashComponent(component interface{}) string {
 func (r *ReferenceResolver) normalizeComponent(component interface{}) interface{} {
 	switch v := component.(type) {
 	case map[string]interface{}:
-		normalized := make(map[string]interface{}, len(v))
-		for k, val := range v {
-			if k == "$ref" {
-				continue
+		keys := make([]string, 0, len(v))
+		for k := range v {
+			if k != "$ref" && k != "description" && k != "example" &&
+				k != "title" && k != "deprecated" && k != "externalDocs" && k != "xml" &&
+				k != "nullable" && k != "readOnly" && k != "writeOnly" {
+				keys = append(keys, k)
 			}
-			normalized[k] = r.normalizeComponent(val)
+		}
+		sort.Strings(keys)
+		normalized := make(map[string]interface{}, len(keys))
+		for _, k := range keys {
+			normalized[k] = r.normalizeComponent(v[k])
 		}
 		return normalized
 	case []interface{}:
 		normalized := make([]interface{}, len(v))
 		for i, val := range v {
 			normalized[i] = r.normalizeComponent(val)
+		}
+		if len(normalized) > 0 {
+			if _, ok := normalized[0].(string); ok {
+				strSlice := make([]string, len(normalized))
+				allStrings := true
+				for j, item := range normalized {
+					if s, ok := item.(string); ok {
+						strSlice[j] = s
+					} else {
+						allStrings = false
+						break
+					}
+				}
+				if allStrings {
+					sort.Strings(strSlice)
+					result := make([]interface{}, len(strSlice))
+					for j, s := range strSlice {
+						result[j] = s
+					}
+					return result
+				}
+			}
 		}
 		return normalized
 	default:
@@ -570,7 +485,6 @@ func (r *ReferenceResolver) cleanNilValues(node interface{}) interface{} {
 	}
 }
 
-// resolveInternalRef разрешает внутреннюю ссылку и возвращает содержимое компонента
 func (r *ReferenceResolver) resolveInternalRef(ref string) (interface{}, error) {
 	if !strings.HasPrefix(ref, "#/components/") {
 		return nil, fmt.Errorf("not an internal component reference: %s", ref)

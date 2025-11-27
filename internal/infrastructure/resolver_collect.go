@@ -9,7 +9,6 @@ import (
 	"github.com/miorlan/openapi-bundler/internal/domain"
 )
 
-// collectExternalRefs собирает все пути к внешним файлам из документа
 func (r *ReferenceResolver) collectExternalRefs(ctx context.Context, node interface{}, baseDir string, config domain.Config, depth int, refs map[string]string) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -149,7 +148,6 @@ func (r *ReferenceResolver) collectExternalRefs(ctx context.Context, node interf
 	return nil
 }
 
-// preloadExternalFiles предзагружает все внешние файлы параллельно
 func (r *ReferenceResolver) preloadExternalFiles(ctx context.Context, data map[string]interface{}, basePath string, config domain.Config) error {
 	refs := make(map[string]string)
 	visitedPaths := make(map[string]bool)
@@ -347,9 +345,7 @@ func (r *ReferenceResolver) preloadExternalFiles(ctx context.Context, data map[s
 		r.fileCache[path] = content
 	}
 
-	// Рекурсивно собираем ссылки из загруженных файлов и загружаем их
 	for {
-		// Собираем ссылки из только что загруженных файлов
 		for path := range loadedFiles {
 			if content, ok := r.fileCache[path]; ok {
 				var nextBaseDir string
@@ -366,7 +362,6 @@ func (r *ReferenceResolver) preloadExternalFiles(ctx context.Context, data map[s
 			}
 		}
 
-		// Проверяем, есть ли новые файлы для загрузки
 		newPaths := make([]string, 0)
 		for path := range refs {
 			if _, exists := r.fileCache[path]; !exists {

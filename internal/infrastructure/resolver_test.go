@@ -204,7 +204,6 @@ components:
 
 	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
 	
-	// После "поднятия" $ref, UserRef должен содержать реальное содержимое, а не ссылку
 	userRef, exists := schemas["UserRef"]
 	if !exists {
 		t.Error("UserRef should exist in components/schemas")
@@ -215,12 +214,10 @@ components:
 		t.Fatalf("UserRef should be a map, got %T", userRef)
 	}
 	
-	// После "поднятия" должно быть реальное содержимое, а не $ref
 	if _, hasRef := userRefMap["$ref"]; hasRef {
 		t.Error("UserRef should not contain $ref after lifting - it should contain actual schema content")
 	}
 	
-	// Проверяем, что содержимое соответствует схеме User
 	if userType, hasType := userRefMap["type"]; !hasType || userType != "object" {
 		t.Error("UserRef should contain the actual schema content (type: object) after lifting")
 	}
@@ -879,8 +876,6 @@ description: Name field
 	}
 }
 
-// TestReferenceResolver_ComponentNames_RealNames проверяет, что компоненты получают реальные имена,
-// а не автоматически сгенерированные типа SchemaN
 func TestReferenceResolver_ComponentNames_RealNames(t *testing.T) {
 	tmpDir := t.TempDir()
 	schemasDir := filepath.Join(tmpDir, "schemas")
@@ -888,7 +883,6 @@ func TestReferenceResolver_ComponentNames_RealNames(t *testing.T) {
 		t.Fatalf("Failed to create schemas directory: %v", err)
 	}
 
-	// Создаём файл с компонентом Error
 	errorFile := filepath.Join(schemasDir, "Error.yaml")
 	errorContent := []byte(`type: object
 properties:
@@ -901,7 +895,6 @@ properties:
 		t.Fatalf("Failed to create error file: %v", err)
 	}
 
-	// Создаём файл с компонентом ChangePasswordRequest
 	changePasswordFile := filepath.Join(schemasDir, "ChangePasswordRequest.yaml")
 	changePasswordContent := []byte(`type: object
 properties:
@@ -914,7 +907,6 @@ properties:
 		t.Fatalf("Failed to create change password file: %v", err)
 	}
 
-	// Создаём файл с компонентом в components/schemas
 	requestGuestsFile := filepath.Join(schemasDir, "RequestGuests.yaml")
 	requestGuestsContent := []byte(`openapi: 3.0.0
 components:
@@ -988,28 +980,22 @@ components:
 		t.Fatalf("ResolveAll() error = %v", err)
 	}
 
-	// Проверяем, что компоненты имеют правильные имена
 	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
 
-	// Проверяем Error - должно быть имя из файла
 	if _, exists := schemas["Error"]; !exists {
 		t.Error("Error schema should exist with name 'Error'")
 	}
 
-	// Проверяем ChangePasswordRequest - должно быть имя из файла
 	if _, exists := schemas["ChangePasswordRequest"]; !exists {
 		t.Error("ChangePasswordRequest schema should exist with name 'ChangePasswordRequest'")
 	}
 
-	// Проверяем RequestGuests - должно быть имя из фрагмента
 	if _, exists := schemas["RequestGuests"]; !exists {
 		t.Error("RequestGuests schema should exist with name 'RequestGuests'")
 	}
 
-	// Проверяем, что НЕТ имён типа SchemaN
 	for name := range schemas {
 		if strings.HasPrefix(name, "Schema") {
-			// Проверяем, что это не SchemaN (где N - число)
 			if len(name) > 6 {
 				rest := name[6:]
 				isNumber := true
@@ -1026,12 +1012,10 @@ components:
 		}
 	}
 
-	// Проверяем, что $ref указывают на правильные имена
 	paths := data["paths"].(map[string]interface{})
 	path := paths["/api/v1/profile/change-password"].(map[string]interface{})
 	post := path["post"].(map[string]interface{})
 	
-	// Проверяем requestBody
 	requestBody := post["requestBody"].(map[string]interface{})
 	content := requestBody["content"].(map[string]interface{})
 	appJson := content["application/json"].(map[string]interface{})
@@ -1048,10 +1032,8 @@ components:
 		t.Errorf("$ref should be '#/components/schemas/ChangePasswordRequest', got '%s'", refStr)
 	}
 
-	// Проверяем responses
 	responses := post["responses"].(map[string]interface{})
 	
-	// Проверяем 400 response
 	response400 := responses["400"].(map[string]interface{})
 	content400 := response400["content"].(map[string]interface{})
 	appJson400 := content400["application/json"].(map[string]interface{})
@@ -1068,7 +1050,6 @@ components:
 		t.Errorf("$ref should be '#/components/schemas/Error', got '%s'", refStr400)
 	}
 	
-	// Проверяем 418 response
 	response418 := responses["418"].(map[string]interface{})
 	content418 := response418["content"].(map[string]interface{})
 	appJson418 := content418["application/json"].(map[string]interface{})
@@ -1085,15 +1066,12 @@ components:
 		t.Errorf("$ref should be '#/components/schemas/Error', got '%s'", refStr418)
 	}
 
-	// Проверяем RequestGuests
 	requestGuests := schemas["RequestGuests"].(map[string]interface{})
 	if requestGuests == nil {
 		t.Error("RequestGuests should exist")
 	}
 }
 
-// TestReferenceResolver_NoDuplicateSchemas проверяет, что не создаются дубликаты схем
-// типа Error и Error1, когда Error уже существует как $ref
 func TestReferenceResolver_NoDuplicateSchemas(t *testing.T) {
 	tmpDir := t.TempDir()
 	schemasDir := filepath.Join(tmpDir, "schemas")
@@ -1101,7 +1079,6 @@ func TestReferenceResolver_NoDuplicateSchemas(t *testing.T) {
 		t.Fatalf("Failed to create schemas directory: %v", err)
 	}
 
-	// Создаём файл с компонентом Error
 	errorFile := filepath.Join(schemasDir, "Error.yaml")
 	errorContent := []byte(`type: object
 title: ErrorObject
@@ -1130,7 +1107,6 @@ properties:
 	parser := NewParser()
 	resolver := NewReferenceResolver(loader, parser)
 
-	// Создаём документ, где Error уже существует как $ref
 	data := map[string]interface{}{
 		"openapi": "3.0.0",
 		"paths": map[string]interface{}{
@@ -1180,10 +1156,8 @@ properties:
 		t.Fatalf("ResolveAll() error = %v", err)
 	}
 
-	// Проверяем, что существует только одна схема Error
 	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
 	
-	// Должна быть только одна схема Error
 	errorCount := 0
 	error1Count := 0
 	for name := range schemas {
@@ -1191,7 +1165,6 @@ properties:
 			errorCount++
 		}
 		if strings.HasPrefix(name, "Error") && len(name) > 5 {
-			// Проверяем, не является ли это Error1, Error2 и т.д.
 			rest := name[5:]
 			isNumber := true
 			for _, r := range rest {
@@ -1215,7 +1188,6 @@ properties:
 		t.Errorf("Found %d duplicate Error schemas (Error1, Error2, etc.). Should not create duplicates", error1Count)
 	}
 	
-	// Проверяем, что Error содержит реальное содержимое, а не только $ref
 	errorSchema, exists := schemas["Error"]
 	if !exists {
 		t.Fatal("Error schema should exist")
@@ -1226,25 +1198,21 @@ properties:
 		t.Fatalf("Error schema should be a map, got %T", errorSchema)
 	}
 	
-	// Проверяем, что это не только $ref
 	if _, hasRef := errorMap["$ref"]; hasRef {
 		if len(errorMap) == 1 {
 			t.Error("Error schema should contain actual content, not only $ref")
 		}
 	}
 	
-	// Проверяем, что содержимое правильное
 	if errorType, hasType := errorMap["type"]; !hasType || errorType != "object" {
 		t.Error("Error schema should have type: object")
 	}
 	
-	// Проверяем, что все $ref указывают на правильное имя
 	paths := data["paths"].(map[string]interface{})
 	path := paths["/api/v1/dictionary/{dictionary_id}/counter"].(map[string]interface{})
 	post := path["post"].(map[string]interface{})
 	responses := post["responses"].(map[string]interface{})
 	
-	// Проверяем 404 response
 	response404 := responses["404"].(map[string]interface{})
 	content404 := response404["content"].(map[string]interface{})
 	appJson404 := content404["application/json"].(map[string]interface{})
@@ -1261,7 +1229,6 @@ properties:
 		t.Errorf("$ref should be '#/components/schemas/Error', got '%s'", refStr404)
 	}
 	
-	// Проверяем 500 response
 	response500 := responses["500"].(map[string]interface{})
 	content500 := response500["content"].(map[string]interface{})
 	appJson500 := content500["application/json"].(map[string]interface{})
@@ -1279,8 +1246,6 @@ properties:
 	}
 }
 
-// TestReferenceResolver_NoDuplicateSchemas_Multiple проверяет, что не создаются дубликаты
-// для нескольких компонентов одновременно (AdditionalInfoItem, AnonimGuest)
 func TestReferenceResolver_NoDuplicateSchemas_Multiple(t *testing.T) {
 	tmpDir := t.TempDir()
 	schemasDir := filepath.Join(tmpDir, "schemas")
@@ -1288,7 +1253,6 @@ func TestReferenceResolver_NoDuplicateSchemas_Multiple(t *testing.T) {
 		t.Fatalf("Failed to create schemas directory: %v", err)
 	}
 
-	// Создаём файл с компонентом AdditionalInfoItem
 	additionalInfoItemFile := filepath.Join(schemasDir, "AdditionalInfoItem.yaml")
 	additionalInfoItemContent := []byte(`type: object
 required:
@@ -1312,7 +1276,6 @@ properties:
 		t.Fatalf("Failed to create additionalInfoItem file: %v", err)
 	}
 
-	// Создаём файл с компонентом AnonimGuest
 	anonimGuestFile := filepath.Join(schemasDir, "AnonimGuest.yaml")
 	anonimGuestContent := []byte(`type: object
 description: Гость не существовал в каталоге, пользователя добавим в заявку как анонимного
@@ -1338,7 +1301,6 @@ properties:
 	parser := NewParser()
 	resolver := NewReferenceResolver(loader, parser)
 
-	// Создаём документ, где компоненты уже существуют как $ref
 	data := map[string]interface{}{
 		"openapi": "3.0.0",
 		"paths": map[string]interface{}{
@@ -1388,20 +1350,16 @@ properties:
 		t.Fatalf("ResolveAll() error = %v", err)
 	}
 
-	// Проверяем, что компоненты имеют правильные имена
 	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
 
-	// Проверяем AdditionalInfoItem
 	if _, exists := schemas["AdditionalInfoItem"]; !exists {
 		t.Error("AdditionalInfoItem schema should exist with name 'AdditionalInfoItem'")
 	}
 
-	// Проверяем AnonimGuest
 	if _, exists := schemas["AnonimGuest"]; !exists {
 		t.Error("AnonimGuest schema should exist with name 'AnonimGuest'")
 	}
 
-	// Проверяем, что НЕТ дубликатов
 	for name := range schemas {
 		if strings.HasPrefix(name, "AdditionalInfoItem") && len(name) > 18 {
 			rest := name[18:]
@@ -1431,7 +1389,6 @@ properties:
 		}
 	}
 
-	// Проверяем, что компоненты содержат реальное содержимое, а не только $ref
 	additionalInfoItem := schemas["AdditionalInfoItem"].(map[string]interface{})
 	if _, hasRef := additionalInfoItem["$ref"]; hasRef {
 		if len(additionalInfoItem) == 1 {
@@ -1453,8 +1410,6 @@ properties:
 	}
 }
 
-// TestReferenceResolver_NoDuplicateSchemas_ChangePasswordRequest проверяет конкретный случай
-// с ChangePasswordRequest, который создаёт дубликат ChangePasswordRequest1
 func TestReferenceResolver_NoDuplicateSchemas_ChangePasswordRequest(t *testing.T) {
 	tmpDir := t.TempDir()
 	schemasDir := filepath.Join(tmpDir, "schemas")
@@ -1462,7 +1417,6 @@ func TestReferenceResolver_NoDuplicateSchemas_ChangePasswordRequest(t *testing.T
 		t.Fatalf("Failed to create schemas directory: %v", err)
 	}
 
-	// Создаём файл с компонентом ChangePasswordRequest
 	changePasswordRequestFile := filepath.Join(schemasDir, "ChangePasswordRequest.yaml")
 	changePasswordRequestContent := []byte(`type: object
 required:
@@ -1479,7 +1433,6 @@ properties:
 	parser := NewParser()
 	resolver := NewReferenceResolver(loader, parser)
 
-	// Создаём документ, где ChangePasswordRequest уже существует как $ref
 	data := map[string]interface{}{
 		"openapi": "3.0.0",
 		"paths": map[string]interface{}{
@@ -1515,15 +1468,12 @@ properties:
 		t.Fatalf("ResolveAll() error = %v", err)
 	}
 
-	// Проверяем, что компонент имеет правильное имя
 	schemas := data["components"].(map[string]interface{})["schemas"].(map[string]interface{})
 
-	// Проверяем ChangePasswordRequest
 	if _, exists := schemas["ChangePasswordRequest"]; !exists {
 		t.Error("ChangePasswordRequest schema should exist with name 'ChangePasswordRequest'")
 	}
 
-	// Проверяем, что НЕТ дубликатов
 	for name := range schemas {
 		if strings.HasPrefix(name, "ChangePasswordRequest") && len(name) > 20 {
 			rest := name[20:]
@@ -1540,7 +1490,6 @@ properties:
 		}
 	}
 
-	// Проверяем, что компонент содержит реальное содержимое, а не только $ref
 	changePasswordRequest := schemas["ChangePasswordRequest"].(map[string]interface{})
 	if _, hasRef := changePasswordRequest["$ref"]; hasRef {
 		if len(changePasswordRequest) == 1 {
@@ -1552,8 +1501,6 @@ properties:
 	}
 }
 
-// TestReferenceResolver_ParametersKeepRef проверяет, что параметры остаются как $ref,
-// а не разворачиваются в полные объекты
 func TestReferenceResolver_ParametersKeepRef(t *testing.T) {
 	tmpDir := t.TempDir()
 	parametersDir := filepath.Join(tmpDir, "parameters")
@@ -1561,7 +1508,6 @@ func TestReferenceResolver_ParametersKeepRef(t *testing.T) {
 		t.Fatalf("Failed to create parameters directory: %v", err)
 	}
 
-	// Создаём файлы с параметрами
 	xDeviceIdFile := filepath.Join(parametersDir, "X-Device-Id.yaml")
 	xDeviceIdContent := []byte(`description: |
   Уникальный идентификатор устройства...
@@ -1642,7 +1588,6 @@ schema:
 		t.Fatalf("ResolveAll() error = %v", err)
 	}
 
-	// Проверяем, что параметры остались как $ref
 	paths := data["paths"].(map[string]interface{})
 	path := paths["/api/v1/dictionary/{dictionary_id}/counter"].(map[string]interface{})
 	post := path["post"].(map[string]interface{})
@@ -1660,7 +1605,6 @@ schema:
 		t.Fatalf("parameters should have 3 items, got %d", len(paramsArray))
 	}
 
-	// Проверяем, что все параметры остались как $ref
 	for i, param := range paramsArray {
 		paramMap, ok := param.(map[string]interface{})
 		if !ok {
@@ -1681,13 +1625,11 @@ schema:
 			t.Errorf("parameter %d $ref should be an internal reference, got %s", i, refStr)
 		}
 
-		// Проверяем, что это только $ref, а не полный объект
 		if len(paramMap) != 1 {
 			t.Errorf("parameter %d should contain only $ref, got %d fields: %v", i, len(paramMap), paramMap)
 		}
 	}
 
-	// Проверяем, что параметры добавлены в components.parameters
 	components, hasComponents := data["components"].(map[string]interface{})
 	if !hasComponents {
 		t.Fatal("components section should exist")
@@ -1697,11 +1639,9 @@ schema:
 		t.Fatal("parameters section should exist in components")
 	}
 
-	// Имена сохраняют дефисы (не нормализуются)
 	expectedParams := []string{"X-Device-Id", "X-App-Version", "dictionaryIdParam"}
 	for _, expectedName := range expectedParams {
 		if _, exists := parametersSection[expectedName]; !exists {
-			// Выводим доступные имена для отладки
 			availableNames := make([]string, 0, len(parametersSection))
 			for name := range parametersSection {
 				availableNames = append(availableNames, name)
