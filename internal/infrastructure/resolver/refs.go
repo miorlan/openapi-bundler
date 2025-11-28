@@ -505,11 +505,20 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 		if len(parts) >= 2 && parts[0] == "components" {
 			componentType = parts[1]
 			
-			// If fragment points to a component in a components.json file,
-			// extract all components from that file, not just the one referenced
-			if contentMap, ok := content.(map[string]interface{}); ok {
+				if contentMap, ok := content.(map[string]interface{}); ok {
 				if comps, ok := contentMap["components"].(map[string]interface{}); ok {
-					// Extract all components from this file
+					for _, ct := range componentTypes {
+						if section, ok := comps[ct].(map[string]interface{}); ok {
+							for name := range section {
+								normalizedName := r.normalizeComponentName(name)
+								preRegKey := refPath + "#/components/" + ct + "/" + name
+								if _, exists := r.componentRefs[preRegKey]; !exists {
+									r.componentRefs[preRegKey] = "#/components/" + ct + "/" + normalizedName
+								}
+							}
+						}
+					}
+					
 					for _, ct := range componentTypes {
 						if section, ok := comps[ct].(map[string]interface{}); ok {
 							components := r.rootDoc["components"].(map[string]interface{})
@@ -524,7 +533,6 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 								if _, exists := targetSection[normalizedName]; !exists {
 									compCopy := r.deepCopy(comp)
 									if compCopy != nil {
-										// Process references within the component
 										if err := r.replaceExternalRefsWithContext(ctx, compCopy, nextBaseDir, config, depth+1, false, false); err != nil {
 											return "", fmt.Errorf("failed to process component %s: %w", name, err)
 										}
@@ -688,6 +696,9 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 	if componentCopy == nil {
 		return "", fmt.Errorf("component copy is nil for ref: %s", ref)
 	}
+	
+	internalRefPreview := "#/components/" + componentType + "/" + componentName
+	r.componentRefs[visitedKey] = internalRefPreview
 	
 	if err := r.replaceExternalRefsWithContext(ctx, componentCopy, nextBaseDir, config, depth+1, false, false); err != nil {
 		return "", fmt.Errorf("failed to process component: %w", err)
