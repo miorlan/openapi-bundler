@@ -38,6 +38,14 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 							continue
 						}
 					} else {
+						if schemaVal, hasSchema := paramMap["schema"]; hasSchema {
+							if schemaMap, ok := schemaVal.(map[string]interface{}); ok {
+								if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, inContentContext, true); err != nil {
+									return fmt.Errorf("failed to process schema in parameter: %w", err)
+								}
+							}
+						}
+						
 						paramName := ""
 						if nameVal, hasName := paramMap["name"]; hasName {
 							if nameStr, ok := nameVal.(string); ok {
@@ -246,6 +254,11 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 							}
 						}
 					}
+					if exists && schemaName != "" {
+						r.schemaFileToName[normalizedPath] = schemaName
+						pathWithoutExt := strings.TrimSuffix(normalizedPath, filepath.Ext(normalizedPath))
+						r.schemaFileToName[pathWithoutExt] = schemaName
+					}
 				}
 				
 				if exists {
@@ -262,7 +275,27 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				}
 			}
 
-			// First try to expand as a path
+			if strings.Contains(refPath, "schemas") && inSchemaContext {
+				fileName := filepath.Base(refPath)
+				fileNameWithoutExt := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+				normalizedFileName := r.normalizeComponentName(fileNameWithoutExt)
+				
+				if schemas, ok := r.components["schemas"]; ok {
+					if _, componentExists := schemas[normalizedFileName]; componentExists {
+						n["$ref"] = "#/components/schemas/" + normalizedFileName
+						return nil
+					} else {
+						for compName := range schemas {
+							normalizedCompName := r.normalizeComponentName(compName)
+							if normalizedCompName == normalizedFileName {
+								n["$ref"] = "#/components/schemas/" + compName
+								return nil
+							}
+						}
+					}
+				}
+			}
+			
 			expandedPath, expandErr := r.expandPathRef(ctx, refStr, baseDir, config, depth)
 			if expandErr == nil && expandedPath != nil {
 				for k, v := range expandedPath {
@@ -272,16 +305,55 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				return nil
 			}
 			
-			// If expandPathRef failed, check if it's because the file is a path definition
-			// by trying to load and check the file content
+			if expandErr != nil && strings.Contains(expandErr.Error(), "schema file") {
+				resolvedPath := r.getRefPath(refStr, baseDir)
+				if resolvedPath != "" {
+					var normalizedPath string
+					if absPath, err := filepath.Abs(resolvedPath); err == nil {
+						normalizedPath = absPath
+					} else {
+						normalizedPath = resolvedPath
+					}
+					
+					fileName := filepath.Base(normalizedPath)
+					fileNameWithoutExt := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+					normalizedFileName := r.normalizeComponentName(fileNameWithoutExt)
+					
+					if schemas, ok := r.components["schemas"]; ok {
+						if _, componentExists := schemas[normalizedFileName]; componentExists {
+							n["$ref"] = "#/components/schemas/" + normalizedFileName
+							return nil
+						} else {
+							for compName := range schemas {
+								normalizedCompName := r.normalizeComponentName(compName)
+								if normalizedCompName == normalizedFileName {
+									n["$ref"] = "#/components/schemas/" + compName
+									return nil
+								}
+							}
+						}
+					}
+					
+					if !strings.Contains(normalizedPath, "http://") && !strings.Contains(normalizedPath, "https://") {
+						pathWithoutExt := strings.TrimSuffix(normalizedPath, filepath.Ext(normalizedPath))
+						r.schemaFileToName[normalizedPath] = normalizedFileName
+						r.schemaFileToName[pathWithoutExt] = normalizedFileName
+						
+						componentRef, err := r.resolveAndReplaceExternalRefWithType(ctx, refStr, baseDir, config, depth, "schemas", false)
+						if err == nil && componentRef != "" {
+							n["$ref"] = componentRef
+							return nil
+						}
+					}
+				}
+			}
+			
 			if expandErr != nil {
-				// Check if file exists and contains path definition (HTTP methods)
 				refPath := r.getRefPath(refStr, baseDir)
 				if refPath != "" {
 					content, loadErr := r.loadAndParseFile(ctx, refStr, baseDir, config)
 					if loadErr == nil {
 						if contentMap, ok := content.(map[string]interface{}); ok {
-							// Check if it's a path definition (has HTTP methods)
 							hasHTTPMethod := false
 							for _, method := range []string{"get", "post", "put", "delete", "patch", "head", "options", "trace"} {
 								if _, hasMethod := contentMap[method]; hasMethod {
@@ -291,7 +363,6 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 							}
 							
 							if hasHTTPMethod {
-								// It's a path definition, try to expand it properly
 								expanded := r.deepCopy(contentMap).(map[string]interface{})
 								nextBaseDir := filepath.Dir(refPath)
 								if err := r.replaceExternalRefsWithContext(ctx, expanded, nextBaseDir, config, depth+1, false, false); err != nil {
@@ -308,7 +379,6 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				}
 			}
 			
-			// If not a path, try to resolve as component
 			componentRef, err := r.resolveAndReplaceExternalRefWithType(ctx, refStr, baseDir, config, depth, "schemas", false)
 			if err != nil {
 				return fmt.Errorf("failed to resolve external ref %s: %w", refStr, err)
@@ -838,6 +908,34 @@ func (r *ReferenceResolver) expandPathRef(ctx context.Context, ref string, baseD
 
 	if !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
 		refPath = filepath.Clean(refPath)
+	}
+
+	// Don't inline schema files - they should be resolved as components
+	// Check if this is a schema file by checking the path
+	if strings.Contains(refPath, "schemas") || strings.Contains(strings.ToLower(refPath), "schema") {
+		// Check if this schema file is already registered
+		var normalizedPath string
+		if absPath, err := filepath.Abs(refPath); err == nil {
+			normalizedPath = absPath
+		} else {
+			normalizedPath = refPath
+		}
+		
+		// Check if schema is registered
+		if schemaName, exists := r.schemaFileToName[normalizedPath]; exists {
+			return nil, fmt.Errorf("schema file should be resolved as component: %s -> #/components/schemas/%s", refPath, schemaName)
+		}
+		
+		pathWithoutExt := strings.TrimSuffix(normalizedPath, filepath.Ext(normalizedPath))
+		if schemaName, exists := r.schemaFileToName[pathWithoutExt]; exists {
+			return nil, fmt.Errorf("schema file should be resolved as component: %s -> #/components/schemas/%s", refPath, schemaName)
+		}
+		
+		// If file is in schemas directory but not registered, don't inline it
+		// Let it be processed as a component reference instead
+		if strings.Contains(filepath.Dir(refPath), "schemas") {
+			return nil, fmt.Errorf("schema file should not be inlined: %s", refPath)
+		}
 	}
 
 	visitedKey := refPath

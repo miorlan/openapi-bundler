@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -115,6 +116,8 @@ func (r *ReferenceResolver) expandComponentsSections(ctx context.Context, data m
 		
 		if ct == "schemas" {
 			for schemaName, schemaValue := range sectionMap {
+				normalizedName := r.normalizeComponentName(schemaName)
+				
 				if schemaMap, ok := schemaValue.(map[string]interface{}); ok {
 					if refVal, hasRef := schemaMap["$ref"]; hasRef {
 						if refStr, ok := refVal.(string); ok {
@@ -126,9 +129,23 @@ func (r *ReferenceResolver) expandComponentsSections(ctx context.Context, data m
 								} else {
 									normalizedPath = resolvedRef
 								}
-								normalizedName := r.normalizeComponentName(schemaName)
 								r.schemaFileToName[normalizedPath] = normalizedName
 								pathWithoutExt := strings.TrimSuffix(normalizedPath, filepath.Ext(normalizedPath))
+								r.schemaFileToName[pathWithoutExt] = normalizedName
+							}
+						}
+					}
+					
+					possiblePaths := []string{
+						filepath.Join(sectionBaseDir, schemaName+".yaml"),
+						filepath.Join(sectionBaseDir, schemaName+".yml"),
+						filepath.Join(sectionBaseDir, schemaName+".json"),
+					}
+					for _, possiblePath := range possiblePaths {
+						if absPath, err := filepath.Abs(possiblePath); err == nil {
+							if _, err := os.Stat(possiblePath); err == nil {
+								r.schemaFileToName[absPath] = normalizedName
+								pathWithoutExt := strings.TrimSuffix(absPath, filepath.Ext(absPath))
 								r.schemaFileToName[pathWithoutExt] = normalizedName
 							}
 						}
