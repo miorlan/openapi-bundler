@@ -6,6 +6,7 @@
 *.dylib
 swagger-cli
 openapi
+/openapi-bundler
 rest
 
 # Test binary

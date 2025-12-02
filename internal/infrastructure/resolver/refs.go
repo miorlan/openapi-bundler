@@ -11,78 +11,6 @@ import (
 	"github.com/miorlan/openapi-bundler/internal/infrastructure/errors"
 )
 
-// loadSchemaOnDemand loads a schema from the index if it's not already loaded
-// Returns the internal reference to the schema
-func (r *ReferenceResolver) loadSchemaOnDemand(ctx context.Context, schemaName string, config domain.Config, depth int) (string, error) {
-	// Check if already loaded
-	components := r.rootDoc["components"].(map[string]interface{})
-	schemas, ok := components["schemas"].(map[string]interface{})
-	if !ok {
-		schemas = make(map[string]interface{})
-		components["schemas"] = schemas
-	}
-	
-	// If schema is already loaded, just return the ref
-	if _, exists := schemas[schemaName]; exists {
-		r.usedSchemas[schemaName] = true
-		return "#/components/schemas/" + schemaName, nil
-	}
-	
-	// Check if schema is in the index
-	refStr, exists := r.schemaIndex[schemaName]
-	if !exists {
-		// Schema not in index, might be defined elsewhere
-		return "", nil
-	}
-	
-	// Mark as used
-	r.usedSchemas[schemaName] = true
-	
-	// Load the schema file
-	content, err := r.loadAndParseFile(ctx, refStr, r.schemaIndexBaseDir, config)
-	if err != nil {
-		return "", fmt.Errorf("failed to load schema %s: %w", schemaName, err)
-	}
-	
-	// Get the base directory for resolving nested refs
-	refPath := r.getRefPath(refStr, r.schemaIndexBaseDir)
-	var nextBaseDir string
-	if strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") {
-		nextBaseDir = refPath[:strings.LastIndex(refPath, "/")+1]
-	} else {
-		nextBaseDir = filepath.Dir(refPath)
-	}
-	
-	// Deep copy the content
-	schemaCopy := r.deepCopy(content)
-	if schemaCopy == nil {
-		return "", fmt.Errorf("failed to copy schema %s", schemaName)
-	}
-	
-	// Add to schemas before processing refs (to handle circular refs)
-	schemas[schemaName] = schemaCopy
-	r.components["schemas"][schemaName] = schemaCopy
-	
-	// Process nested refs in the schema
-	if schemaMap, ok := schemaCopy.(map[string]interface{}); ok {
-		r.processingComponentsIndex = true
-		r.currentComponentName = schemaName
-		if err := r.replaceExternalRefsWithContext(ctx, schemaMap, nextBaseDir, config, depth+1, false, true); err != nil {
-			r.processingComponentsIndex = false
-			r.currentComponentName = ""
-			return "", fmt.Errorf("failed to process refs in schema %s: %w", schemaName, err)
-		}
-		r.processingComponentsIndex = false
-		r.currentComponentName = ""
-	}
-	
-	// Update hash
-	componentHash := r.hashComponent(schemaCopy)
-	r.componentHashes[componentHash] = schemaName
-	
-	return "#/components/schemas/" + schemaName, nil
-}
-
 func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, node interface{}, baseDir string, config domain.Config, depth int, inContentContext bool, inSchemaContext bool) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -109,17 +37,17 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 						} else if refStr, ok := refVal.(string); ok && strings.HasPrefix(refStr, "#/components/parameters/") {
 							continue
 						}
-				} else {
-					// Process schema refs inside inline parameters (don't extract to components)
-					if schemaVal, hasSchema := paramMap["schema"]; hasSchema {
-						if schemaMap, ok := schemaVal.(map[string]interface{}); ok {
-							if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, inContentContext, true); err != nil {
-								return fmt.Errorf("failed to process schema in parameter: %w", err)
+					} else {
+						// Process schema refs inside inline parameters (don't extract to components)
+						if schemaVal, hasSchema := paramMap["schema"]; hasSchema {
+							if schemaMap, ok := schemaVal.(map[string]interface{}); ok {
+								if err := r.replaceExternalRefsWithContext(ctx, schemaMap, baseDir, config, depth, inContentContext, true); err != nil {
+									return fmt.Errorf("failed to process schema in parameter: %w", err)
+								}
 							}
 						}
+						// Keep inline parameters as-is (like swagger-cli does)
 					}
-					// Keep inline parameters as-is (like swagger-cli does)
-				}
 				}
 			}
 		}
@@ -232,143 +160,51 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 				return nil
 			}
 
+			// Try to find schema by resolved path
 			resolvedPath := r.getRefPath(refPath, baseDir)
 			if resolvedPath != "" {
-				var normalizedPath string
-				if absPath, err := filepath.Abs(resolvedPath); err == nil {
-					normalizedPath = absPath
-				} else {
-					normalizedPath = resolvedPath
-				}
-				
-				var schemaName string
-				var exists bool
-				
-				if schemaName, exists = r.schemaFileToName[normalizedPath]; !exists {
-					pathWithoutExt := strings.TrimSuffix(normalizedPath, filepath.Ext(normalizedPath))
-					schemaName, exists = r.schemaFileToName[pathWithoutExt]
-				}
-				
-				if !exists && strings.Contains(normalizedPath, "schemas") {
-					fileName := filepath.Base(normalizedPath)
-					fileNameWithoutExt := strings.TrimSuffix(fileName, filepath.Ext(fileName))
-					normalizedFileName := r.normalizeComponentName(fileNameWithoutExt)
-					
-					for filePath, compName := range r.schemaFileToName {
-						basePath := filepath.Base(filePath)
-						if basePath == fileName || basePath == fileNameWithoutExt {
-							schemaName = compName
-							exists = true
-							break
-						}
-					}
-					
-					if !exists {
-						if components, ok := r.rootDoc["components"].(map[string]interface{}); ok {
-							if schemasVal, ok := components["schemas"]; ok {
-								if schemas, ok := schemasVal.(map[string]interface{}); ok {
-									if _, componentExists := schemas[normalizedFileName]; componentExists {
-										schemaName = normalizedFileName
-										exists = true
-									} else {
-										for compName := range schemas {
-											normalizedCompName := r.normalizeComponentName(compName)
-											if normalizedCompName == normalizedFileName {
-												schemaName = compName
-												exists = true
-												break
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-					
-					if !exists {
-						if schemas, ok := r.components["schemas"]; ok {
-							if _, componentExists := schemas[normalizedFileName]; componentExists {
-								schemaName = normalizedFileName
-								exists = true
-							} else {
-								for compName := range schemas {
-									normalizedCompName := r.normalizeComponentName(compName)
-									if normalizedCompName == normalizedFileName {
-										schemaName = compName
-										exists = true
-										break
-									}
-								}
-							}
-						}
-					}
-					if exists && schemaName != "" {
-						r.schemaFileToName[normalizedPath] = schemaName
-						pathWithoutExt := strings.TrimSuffix(normalizedPath, filepath.Ext(normalizedPath))
-						r.schemaFileToName[pathWithoutExt] = schemaName
-					}
-				}
-				
-			if exists {
-				if r.processingComponentsIndex && r.currentComponentName != "" {
-					if schemaName == r.currentComponentName {
-						// Self-reference, skip
-					} else {
+				if schemaName, exists := r.findSchemaByPath(resolvedPath); exists {
+					// Skip self-references when processing components
+					if !(r.processingComponentsIndex && r.currentComponentName == schemaName) {
 						n["$ref"] = "#/components/schemas/" + schemaName
 						return nil
 					}
-				} else {
-					n["$ref"] = "#/components/schemas/" + schemaName
-					return nil
 				}
 			}
-			}
 
-		// Check if this is a schema file reference
-		if strings.Contains(refPath, "schemas") {
-			fileName := filepath.Base(refPath)
-			fileNameWithoutExt := strings.TrimSuffix(fileName, filepath.Ext(fileName))
-			normalizedFileName := r.normalizeComponentName(fileNameWithoutExt)
-			
-			// Check if schema exists in rootDoc components (loaded from _index.yaml)
-			if components, ok := r.rootDoc["components"].(map[string]interface{}); ok {
-				if schemas, ok := components["schemas"].(map[string]interface{}); ok {
-					if _, componentExists := schemas[normalizedFileName]; componentExists {
-						n["$ref"] = "#/components/schemas/" + normalizedFileName
-						return nil
-					}
-					for compName := range schemas {
-						normalizedCompName := r.normalizeComponentName(compName)
-						if normalizedCompName == normalizedFileName {
-							n["$ref"] = "#/components/schemas/" + compName
+			// Check if this is a schema file reference not in _index.yaml - inline it
+			if strings.Contains(refPath, "schemas") {
+				inlineRefPath := r.getRefPath(refStr, baseDir)
+				if inlineRefPath != "" {
+					content, loadErr := r.loadAndParseFile(ctx, refStr, baseDir, config)
+					if loadErr == nil {
+						if contentMap, ok := content.(map[string]interface{}); ok {
+							expanded := r.deepCopy(contentMap).(map[string]interface{})
+							nextBaseDir := filepath.Dir(inlineRefPath)
+							if err := r.replaceExternalRefsWithContext(ctx, expanded, nextBaseDir, config, depth+1, false, true); err != nil {
+								return fmt.Errorf("failed to process schema references: %w", err)
+							}
+							for k, v := range expanded {
+								n[k] = v
+							}
+							delete(n, "$ref")
 							return nil
 						}
 					}
 				}
 			}
-			
-			// Also check schemaFileToName mapping
-			resolvedSchemaPath := r.getRefPath(refPath, baseDir)
-			if resolvedSchemaPath != "" {
-				var normalizedSchemaPath string
-				if absPath, err := filepath.Abs(resolvedSchemaPath); err == nil {
-					normalizedSchemaPath = absPath
-				} else {
-					normalizedSchemaPath = resolvedSchemaPath
+
+			// Try to expand as path reference
+			expandedPath, expandErr := r.expandPathRef(ctx, refStr, baseDir, config, depth)
+			if expandErr == nil && expandedPath != nil {
+				for k, v := range expandedPath {
+					n[k] = v
 				}
-				
-				if schemaName, exists := r.schemaFileToName[normalizedSchemaPath]; exists {
-					n["$ref"] = "#/components/schemas/" + schemaName
-					return nil
-				}
-				pathWithoutExt := strings.TrimSuffix(normalizedSchemaPath, filepath.Ext(normalizedSchemaPath))
-				if schemaName, exists := r.schemaFileToName[pathWithoutExt]; exists {
-					n["$ref"] = "#/components/schemas/" + schemaName
-					return nil
-				}
+				delete(n, "$ref")
+				return nil
 			}
-			
-			// Schema not in _index.yaml - inline it (like swagger-cli does)
+
+			// Try to inline content for non-schema files
 			inlineRefPath := r.getRefPath(refStr, baseDir)
 			if inlineRefPath != "" {
 				content, loadErr := r.loadAndParseFile(ctx, refStr, baseDir, config)
@@ -376,49 +212,8 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 					if contentMap, ok := content.(map[string]interface{}); ok {
 						expanded := r.deepCopy(contentMap).(map[string]interface{})
 						nextBaseDir := filepath.Dir(inlineRefPath)
-						if err := r.replaceExternalRefsWithContext(ctx, expanded, nextBaseDir, config, depth+1, false, true); err != nil {
-							return fmt.Errorf("failed to process schema references: %w", err)
-						}
-						for k, v := range expanded {
-							n[k] = v
-						}
-						delete(n, "$ref")
-						return nil
-					}
-				}
-			}
-		}
-			
-		// Try to expand as path reference
-		expandedPath, expandErr := r.expandPathRef(ctx, refStr, baseDir, config, depth)
-		if expandErr == nil && expandedPath != nil {
-			for k, v := range expandedPath {
-				n[k] = v
-			}
-			delete(n, "$ref")
-			return nil
-		}
-		
-		// Try to inline content for non-schema files
-		inlineRefPath := r.getRefPath(refStr, baseDir)
-		if inlineRefPath != "" {
-			content, loadErr := r.loadAndParseFile(ctx, refStr, baseDir, config)
-			if loadErr == nil {
-				if contentMap, ok := content.(map[string]interface{}); ok {
-					// Check if it's a path file (has HTTP methods)
-					hasHTTPMethod := false
-					for _, method := range []string{"get", "post", "put", "delete", "patch", "head", "options", "trace"} {
-						if _, hasMethod := contentMap[method]; hasMethod {
-							hasHTTPMethod = true
-							break
-						}
-					}
-					
-					if hasHTTPMethod {
-						expanded := r.deepCopy(contentMap).(map[string]interface{})
-						nextBaseDir := filepath.Dir(inlineRefPath)
 						if err := r.replaceExternalRefsWithContext(ctx, expanded, nextBaseDir, config, depth+1, false, false); err != nil {
-							return fmt.Errorf("failed to process path references: %w", err)
+							return fmt.Errorf("failed to process references: %w", err)
 						}
 						for k, v := range expanded {
 							n[k] = v
@@ -426,34 +221,21 @@ func (r *ReferenceResolver) replaceExternalRefsWithContext(ctx context.Context, 
 						delete(n, "$ref")
 						return nil
 					}
-					
-					// Inline the content
-					expanded := r.deepCopy(contentMap).(map[string]interface{})
-					nextBaseDir := filepath.Dir(inlineRefPath)
-					if err := r.replaceExternalRefsWithContext(ctx, expanded, nextBaseDir, config, depth+1, false, false); err != nil {
-						return fmt.Errorf("failed to process references: %w", err)
-					}
-					for k, v := range expanded {
-						n[k] = v
-					}
-					delete(n, "$ref")
-					return nil
 				}
 			}
-		}
-		
-		// Fallback: try to resolve as component
-		componentRef, err := r.resolveAndReplaceExternalRefWithType(ctx, refStr, baseDir, config, depth, "schemas", false)
-		if err != nil {
-			return fmt.Errorf("failed to resolve external ref %s: %w", refStr, err)
-		}
-		
-		if componentRef != "" {
-			n["$ref"] = componentRef
-			return nil
-		}
-		
-		return fmt.Errorf("failed to resolve external ref %s: no component created", refStr)
+
+			// Fallback: try to resolve as component
+			componentRef, err := r.resolveAndReplaceExternalRefWithType(ctx, refStr, baseDir, config, depth, "schemas", false)
+			if err != nil {
+				return fmt.Errorf("failed to resolve external ref %s: %w", refStr, err)
+			}
+
+			if componentRef != "" {
+				n["$ref"] = componentRef
+				return nil
+			}
+
+			return fmt.Errorf("failed to resolve external ref %s: no component created", refStr)
 		}
 
 		for k, v := range n {
@@ -604,7 +386,7 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 		}
 		return "", &domain.ErrCircularReference{Path: visitedKey}
 	}
-	
+
 	if !skipExtraction {
 		r.visited[visitedKey] = true
 		defer delete(r.visited, visitedKey)
@@ -627,19 +409,19 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 	if componentType == "" {
 		componentType = "schemas"
 	}
-	
+
 	if fragment != "" {
 		extracted, err := r.resolveJSONPointer(content, fragment)
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve fragment %s: %w", fragment, err)
 		}
 		componentContent = extracted
-		
+
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
 		if len(parts) >= 2 && parts[0] == "components" {
 			componentType = parts[1]
-			
-				if contentMap, ok := content.(map[string]interface{}); ok {
+
+			if contentMap, ok := content.(map[string]interface{}); ok {
 				if comps, ok := contentMap["components"].(map[string]interface{}); ok {
 					for _, ct := range componentTypes {
 						if section, ok := comps[ct].(map[string]interface{}); ok {
@@ -652,7 +434,7 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 							}
 						}
 					}
-					
+
 					for _, ct := range componentTypes {
 						if section, ok := comps[ct].(map[string]interface{}); ok {
 							components := r.rootDoc["components"].(map[string]interface{})
@@ -661,7 +443,7 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 								targetSection = make(map[string]interface{})
 								components[ct] = targetSection
 							}
-							
+
 							for name, comp := range section {
 								normalizedName := r.normalizeComponentName(name)
 								if _, exists := targetSection[normalizedName]; !exists {
@@ -754,10 +536,10 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 	if fragment != "" {
 		originalRef = ref + fragment
 	}
-	
+
 	var componentName string
 	var foundComponentName string
-	
+
 	if fragment == "" {
 		if contentMap, ok := content.(map[string]interface{}); ok {
 			if comps, ok := contentMap["components"].(map[string]interface{}); ok {
@@ -774,7 +556,7 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 			}
 		}
 	}
-	
+
 	if cachedName, exists := r.refToComponentName[originalRef]; exists && cachedName != "" {
 		componentName = cachedName
 	} else if foundComponentName != "" {
@@ -793,7 +575,7 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 		componentName = r.getPreferredComponentName(ref, fragment, componentType, componentContent)
 		r.refToComponentName[originalRef] = componentName
 	}
-	
+
 	if skipExtraction {
 		if componentContent != nil {
 			if componentMap, ok := componentContent.(map[string]interface{}); ok {
@@ -830,18 +612,16 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 	if componentCopy == nil {
 		return "", fmt.Errorf("component copy is nil for ref: %s", ref)
 	}
-	
+
 	internalRefPreview := "#/components/" + componentType + "/" + componentName
 	r.componentRefs[visitedKey] = internalRefPreview
-	
+
 	if err := r.replaceExternalRefsWithContext(ctx, componentCopy, nextBaseDir, config, depth+1, false, false); err != nil {
 		return "", fmt.Errorf("failed to process component: %w", err)
 	}
 
 	componentHash := r.hashComponent(componentCopy)
-	
-	r.componentUsageCount[componentHash]++
-	
+
 	if existingName, exists := r.componentHashes[componentHash]; exists {
 		if existingComponent, ok := r.components[componentType][existingName]; ok {
 			if r.componentsEqual(existingComponent, componentCopy) {
@@ -929,21 +709,21 @@ func (r *ReferenceResolver) resolveAndReplaceExternalRefWithType(ctx context.Con
 				}
 			}
 		}
-		
+
 		if r.componentsEqual(existingComponent, componentCopy) {
 			internalRef := "#/components/" + componentType + "/" + componentName
 			r.componentRefs[visitedKey] = internalRef
 			return internalRef, nil
 		}
-		
+
 		componentName = r.ensureUniqueComponentName(componentName, section, componentType)
-		
+
 		if componentName != r.refToComponentName[originalRef] {
 			r.refToComponentName[originalRef] = componentName
 		}
 	} else {
 		componentName = r.ensureUniqueComponentName(componentName, section, componentType)
-		
+
 		if componentName != r.refToComponentName[originalRef] {
 			r.refToComponentName[originalRef] = componentName
 		}
@@ -984,17 +764,17 @@ func (r *ReferenceResolver) expandPathRef(ctx context.Context, ref string, baseD
 		} else {
 			normalizedPath = refPath
 		}
-		
+
 		// Check if schema is registered
 		if schemaName, exists := r.schemaFileToName[normalizedPath]; exists {
 			return nil, fmt.Errorf("schema file should be resolved as component: %s -> #/components/schemas/%s", refPath, schemaName)
 		}
-		
+
 		pathWithoutExt := strings.TrimSuffix(normalizedPath, filepath.Ext(normalizedPath))
 		if schemaName, exists := r.schemaFileToName[pathWithoutExt]; exists {
 			return nil, fmt.Errorf("schema file should be resolved as component: %s -> #/components/schemas/%s", refPath, schemaName)
 		}
-		
+
 		// If file is in schemas directory but not registered, don't inline it
 		// Let it be processed as a component reference instead
 		if strings.Contains(filepath.Dir(refPath), "schemas") {
@@ -1052,267 +832,6 @@ func (r *ReferenceResolver) expandPathRef(ctx context.Context, ref string, baseD
 	return expanded, nil
 }
 
-func (r *ReferenceResolver) expandExternalRefInline(ctx context.Context, ref string, baseDir string, config domain.Config, depth int) (map[string]interface{}, error) {
-	refParts := strings.SplitN(ref, "#", 2)
-	refPath := refParts[0]
-	fragment := ""
-	if len(refParts) > 1 {
-		fragment = "#" + refParts[1]
-	}
-
-	if refPath == "" {
-		return nil, fmt.Errorf("empty ref path")
-	}
-
-	refPath = r.getRefPath(refPath, baseDir)
-	if refPath == "" {
-		return nil, &domain.ErrInvalidReference{Ref: ref}
-	}
-
-	if !strings.HasPrefix(refPath, "http://") && !strings.HasPrefix(refPath, "https://") {
-		refPath = filepath.Clean(refPath)
-	}
-
-	content, err := r.loadAndParseRefFile(ctx, refPath, config)
-	if err != nil {
-		return nil, err
-	}
-
-	var componentContent interface{}
-	if fragment != "" {
-		extracted, err := r.resolveJSONPointer(content, fragment)
-		if err != nil {
-			return nil, fmt.Errorf("failed to resolve fragment %s: %w", fragment, err)
-		}
-		componentContent = extracted
-	} else {
-		if contentMap, ok := content.(map[string]interface{}); ok {
-			componentContent = contentMap
-		} else {
-			return nil, fmt.Errorf("external file content is not a map: %s", ref)
-		}
-	}
-
-	componentCopy := r.deepCopy(componentContent)
-	if componentCopy == nil {
-		return nil, fmt.Errorf("component copy is nil for ref: %s", ref)
-	}
-
-	nextBaseDir := baseDir
-	if strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") {
-		nextBaseDir = refPath[:strings.LastIndex(refPath, "/")+1]
-	} else {
-		nextBaseDir = filepath.Dir(refPath)
-	}
-
-	if err := r.replaceExternalRefsWithContext(ctx, componentCopy, nextBaseDir, config, depth+1, false, false); err != nil {
-		return nil, fmt.Errorf("failed to process component content: %w", err)
-	}
-
-	if componentMap, ok := componentCopy.(map[string]interface{}); ok {
-		return componentMap, nil
-	}
-
-	return nil, fmt.Errorf("component content is not a map: %s", ref)
-}
-
-func (r *ReferenceResolver) inlineSingleUseComponents(ctx context.Context, data map[string]interface{}) error {
-	components, ok := data["components"].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-
-	// Count actual usage of each schema ref in the final document (excluding components.schemas)
-	refUsageCount := make(map[string]int)
-	r.countSchemaRefUsageOutsideSchemas(data, refUsageCount)
-	
-	// Find components that are used exactly once and are simple enough to inline
-	singleUseComponents := make(map[string]string)
-	for _, ct := range componentTypes {
-		section, ok := components[ct].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		for name, component := range section {
-			componentRef := "#/components/" + ct + "/" + name
-			// Only inline if used exactly once outside components section
-			if refUsageCount[componentRef] == 1 {
-				// Don't inline complex schemas that have $ref or are objects with properties
-				if !r.shouldInlineComponent(component) {
-					continue
-				}
-				singleUseComponents[componentRef] = name
-			}
-		}
-	}
-
-	if len(singleUseComponents) == 0 {
-		return nil
-	}
-
-	return r.replaceRefsWithInline(ctx, data, singleUseComponents, components, false, false)
-}
-
-// shouldInlineComponent checks if a component is simple enough to be inlined
-func (r *ReferenceResolver) shouldInlineComponent(component interface{}) bool {
-	componentMap, ok := component.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	
-	// Don't inline if it has $ref (references other schemas)
-	if r.hasNestedRef(componentMap) {
-		return false
-	}
-	
-	// Don't inline objects with properties (complex structures)
-	if _, hasProperties := componentMap["properties"]; hasProperties {
-		return false
-	}
-	
-	// Don't inline if it has allOf, oneOf, anyOf
-	if _, hasAllOf := componentMap["allOf"]; hasAllOf {
-		return false
-	}
-	if _, hasOneOf := componentMap["oneOf"]; hasOneOf {
-		return false
-	}
-	if _, hasAnyOf := componentMap["anyOf"]; hasAnyOf {
-		return false
-	}
-	
-	// Don't inline arrays with complex items
-	if items, hasItems := componentMap["items"]; hasItems {
-		if itemsMap, ok := items.(map[string]interface{}); ok {
-			if _, hasRef := itemsMap["$ref"]; hasRef {
-				return false
-			}
-			if _, hasProps := itemsMap["properties"]; hasProps {
-				return false
-			}
-		}
-	}
-	
-	return true
-}
-
-// hasNestedRef checks if a map contains any $ref
-func (r *ReferenceResolver) hasNestedRef(node interface{}) bool {
-	switch n := node.(type) {
-	case map[string]interface{}:
-		if _, hasRef := n["$ref"]; hasRef {
-			return true
-		}
-		for _, value := range n {
-			if r.hasNestedRef(value) {
-				return true
-			}
-		}
-	case []interface{}:
-		for _, item := range n {
-			if r.hasNestedRef(item) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// countSchemaRefUsageOutsideSchemas counts how many times each schema ref is used outside components.schemas
-func (r *ReferenceResolver) countSchemaRefUsageOutsideSchemas(data map[string]interface{}, usageCount map[string]int) {
-	for key, value := range data {
-		if key == "components" {
-			if comps, ok := value.(map[string]interface{}); ok {
-				for compKey, compValue := range comps {
-					// Skip schemas section - we only want to count usage outside of it
-					if compKey != "schemas" {
-						r.countRefsInNode(compValue, usageCount)
-					}
-				}
-			}
-		} else {
-			r.countRefsInNode(value, usageCount)
-		}
-	}
-}
-
-// countRefsInNode counts $ref usage in a node
-func (r *ReferenceResolver) countRefsInNode(node interface{}, usageCount map[string]int) {
-	switch n := node.(type) {
-	case map[string]interface{}:
-		if refVal, ok := n["$ref"]; ok {
-			if refStr, ok := refVal.(string); ok {
-				if strings.HasPrefix(refStr, "#/components/") {
-					usageCount[refStr]++
-				}
-			}
-		}
-		for _, value := range n {
-			r.countRefsInNode(value, usageCount)
-		}
-	case []interface{}:
-		for _, item := range n {
-			r.countRefsInNode(item, usageCount)
-		}
-	}
-}
-
-func (r *ReferenceResolver) replaceRefsWithInline(ctx context.Context, node interface{}, singleUseComponents map[string]string, components map[string]interface{}, skipNested bool, inContentSchema bool) error {
-	switch n := node.(type) {
-	case map[string]interface{}:
-		// Check if this is a $ref that should be inlined
-		if refVal, hasRef := n["$ref"]; hasRef {
-			if refStr, ok := refVal.(string); ok {
-				if _, shouldInline := singleUseComponents[refStr]; shouldInline {
-					// Get the component to inline
-					parts := strings.Split(strings.TrimPrefix(refStr, "#/components/"), "/")
-					if len(parts) >= 2 {
-						ct := parts[0]
-						name := parts[1]
-						if section, ok := components[ct].(map[string]interface{}); ok {
-							if component, exists := section[name]; exists {
-								if componentMap, ok := component.(map[string]interface{}); ok {
-									// Clear the current map and copy component content
-									for k := range n {
-										delete(n, k)
-									}
-									for k, v := range componentMap {
-										n[k] = r.deepCopy(v)
-									}
-									// Remove from components
-									delete(section, name)
-									// Continue processing the inlined content
-									return r.replaceRefsWithInline(ctx, n, singleUseComponents, components, skipNested, inContentSchema)
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-		
-		// Process all values in the map
-		for key, value := range n {
-			// Skip the schemas section in components to avoid removing schemas that are referenced
-			if key == "schemas" && skipNested {
-				continue
-			}
-			if err := r.replaceRefsWithInline(ctx, value, singleUseComponents, components, skipNested, inContentSchema); err != nil {
-				return err
-			}
-		}
-		
-	case []interface{}:
-		for _, item := range n {
-			if err := r.replaceRefsWithInline(ctx, item, singleUseComponents, components, skipNested, inContentSchema); err != nil {
-				return err
-			}
-		}
-	}
-	
-	return nil
-}
-
 func (r *ReferenceResolver) liftComponentRefs(ctx context.Context, data map[string]interface{}, config domain.Config) error {
 	components, ok := data["components"].(map[string]interface{})
 	if !ok {
@@ -1356,14 +875,14 @@ func (r *ReferenceResolver) liftComponentRefs(ctx context.Context, data map[stri
 		if ct == "schemas" {
 			continue
 		}
-		
+
 		section, ok := components[ct].(map[string]interface{})
 		if !ok {
 			continue
 		}
 
 		toLift := make(map[string]string)
-		
+
 		for name, component := range section {
 			if componentMap, ok := component.(map[string]interface{}); ok {
 				if refVal, hasRef := componentMap["$ref"]; hasRef {
@@ -1371,7 +890,7 @@ func (r *ReferenceResolver) liftComponentRefs(ctx context.Context, data map[stri
 						if refStr, ok := refVal.(string); ok {
 							if strings.HasPrefix(refStr, "#/components/"+ct+"/") {
 								refName := strings.TrimPrefix(refStr, "#/components/"+ct+"/")
-								
+
 								if refName == name {
 									continue
 								}
@@ -1411,4 +930,3 @@ func (r *ReferenceResolver) liftComponentRefs(ctx context.Context, data map[stri
 
 	return nil
 }
-

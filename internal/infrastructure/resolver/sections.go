@@ -115,12 +115,12 @@ func (r *ReferenceResolver) expandComponentsSections(ctx context.Context, data m
 
 		sectionBaseDir := r.getSectionBaseDir(refPath)
 		r.componentsBaseDir[ct] = sectionBaseDir
-		
+
 		if ct == "schemas" {
 			// Build schema file to name mapping for reference resolution
 			for schemaName, schemaValue := range sectionMap {
 				normalizedName := r.normalizeComponentName(schemaName)
-				
+
 				if schemaMap, ok := schemaValue.(map[string]interface{}); ok {
 					if refVal, hasRef := schemaMap["$ref"]; hasRef {
 						if refStr, ok := refVal.(string); ok {
@@ -138,7 +138,7 @@ func (r *ReferenceResolver) expandComponentsSections(ctx context.Context, data m
 							}
 						}
 					}
-					
+
 					possiblePaths := []string{
 						filepath.Join(sectionBaseDir, schemaName+".yaml"),
 						filepath.Join(sectionBaseDir, schemaName+".yml"),
@@ -155,10 +155,10 @@ func (r *ReferenceResolver) expandComponentsSections(ctx context.Context, data m
 					}
 				}
 			}
-			
+
 			// Load all schemas from index (like swagger-cli does)
 			components[ct] = sectionMap
-			
+
 			// Process references in all schemas
 			r.processingComponentsIndex = true
 			for schemaName, schemaValue := range sectionMap {
@@ -176,7 +176,7 @@ func (r *ReferenceResolver) expandComponentsSections(ctx context.Context, data m
 		} else {
 			// For non-schema components: load everything as before
 			components[ct] = sectionMap
-			
+
 			if err := r.replaceExternalRefs(ctx, sectionMap, sectionBaseDir, config, 0); err != nil {
 				return fmt.Errorf("failed to process references in components.%s section: %w", ct, err)
 			}
@@ -185,4 +185,3 @@ func (r *ReferenceResolver) expandComponentsSections(ctx context.Context, data m
 
 	return nil
 }
-
