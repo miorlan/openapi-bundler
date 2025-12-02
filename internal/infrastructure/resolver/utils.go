@@ -57,17 +57,17 @@ func (r *ReferenceResolver) normalizeRefPathForCount(refPath string) string {
 	if refPath == "" {
 		return ""
 	}
-	
+
 	if strings.HasPrefix(refPath, "http://") || strings.HasPrefix(refPath, "https://") {
 		return refPath
 	}
-	
+
 	refPath = filepath.Clean(refPath)
-	
+
 	if absPath, err := filepath.Abs(refPath); err == nil {
 		return absPath
 	}
-	
+
 	return refPath
 }
 
@@ -133,14 +133,14 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 	if name == "" {
 		return name
 	}
-	
+
 	for strings.HasPrefix(name, ".._") {
 		name = strings.TrimPrefix(name, ".._")
 	}
 	for strings.HasPrefix(name, "../") {
 		name = strings.TrimPrefix(name, "../")
 	}
-	
+
 	hasInlinePrefix := strings.HasPrefix(name, "Inline_")
 	if !hasInlinePrefix {
 		for _, ct := range componentTypes {
@@ -150,7 +150,7 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 			}
 		}
 	}
-	
+
 	result := builderPool.Get().(*strings.Builder)
 	defer func() {
 		result.Reset()
@@ -168,32 +168,32 @@ func (r *ReferenceResolver) normalizeComponentName(name string) string {
 			}
 		}
 	}
-	
+
 	normalized := result.String()
-	
+
 	for strings.Contains(normalized, "__") {
 		normalized = strings.ReplaceAll(normalized, "__", "_")
 	}
-	
+
 	normalized = strings.Trim(normalized, "_")
-	
+
 	if normalized == "" {
 		return "Component"
 	}
-	
+
 	if len(normalized) > 0 {
 		first := normalized[0]
 		if (first >= '0' && first <= '9') || first == '_' {
 			normalized = "C" + strings.TrimPrefix(normalized, "_")
 		}
 	}
-	
+
 	return normalized
 }
 
 func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentType string, componentContent interface{}) string {
 	var name string
-	
+
 	if fragment != "" {
 		parts := strings.Split(strings.TrimPrefix(fragment, "#/"), "/")
 		if len(parts) >= 3 && parts[0] == "components" && parts[1] == componentType {
@@ -204,7 +204,7 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 			return r.normalizeComponentName(name)
 		}
 	}
-	
+
 	refPath := strings.Split(ref, "#")[0]
 	if refPath != "" && refPath != "." && refPath != "./" {
 		baseName := filepath.Base(refPath)
@@ -216,7 +216,7 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 			return r.normalizeComponentName(baseName)
 		}
 	}
-	
+
 	if componentContent != nil {
 		if schemaMap, ok := componentContent.(map[string]interface{}); ok {
 			if title, hasTitle := schemaMap["title"]; hasTitle {
@@ -226,7 +226,7 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 			}
 		}
 	}
-	
+
 	if refPath != "" {
 		pathParts := strings.Split(strings.Trim(refPath, "./"), "/")
 		pathName := builderPool.Get().(*strings.Builder)
@@ -245,7 +245,7 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 			return r.normalizeComponentName(pathName.String())
 		}
 	}
-	
+
 	if componentContent != nil {
 		if schemaMap, ok := componentContent.(map[string]interface{}); ok {
 			if schemaType, hasType := schemaMap["type"]; hasType {
@@ -281,7 +281,7 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 			}
 		}
 	}
-	
+
 	if refPath != "" {
 		pathParts := strings.Split(strings.Trim(refPath, "./"), "/")
 		pathName := builderPool.Get().(*strings.Builder)
@@ -299,7 +299,7 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 		pathName.WriteString(componentType)
 		return r.normalizeComponentName(pathName.String())
 	}
-	
+
 	baseName := componentType[:len(componentType)-1]
 	if len(baseName) > 0 {
 		baseName = strings.Title(baseName)
@@ -318,7 +318,7 @@ func (r *ReferenceResolver) getPreferredComponentName(ref, fragment, componentTy
 func (r *ReferenceResolver) ensureUniqueComponentName(preferredName string, section map[string]interface{}, componentType string) string {
 	name := preferredName
 	counter := 0
-	
+
 	for {
 		if _, exists := section[name]; !exists {
 			if _, existsInCollected := r.components[componentType][name]; !existsInCollected {
@@ -350,21 +350,21 @@ func (r *ReferenceResolver) isSimpleSchema(schema map[string]interface{}) bool {
 	if schema == nil {
 		return false
 	}
-	
+
 	if _, hasRef := schema["$ref"]; hasRef {
 		return false
 	}
-	
+
 	schemaType, hasType := schema["type"].(string)
 	if !hasType {
 		return false
 	}
-	
+
 	allowedSimpleFields := map[string]bool{
 		"type":   true,
 		"format": true,
 	}
-	
+
 	if schemaType == "string" || schemaType == "integer" || schemaType == "number" || schemaType == "boolean" {
 		for key := range schema {
 			if !allowedSimpleFields[key] {
@@ -373,7 +373,7 @@ func (r *ReferenceResolver) isSimpleSchema(schema map[string]interface{}) bool {
 		}
 		return true
 	}
-	
+
 	return false
 }
 
@@ -396,7 +396,7 @@ func (r *ReferenceResolver) normalizeComponent(component interface{}) interface{
 	case map[string]interface{}:
 		keys := make([]string, 0, len(v))
 		for k := range v {
-			if k != "$ref" && k != "description" && k != "example" &&
+			if k != "description" && k != "example" &&
 				k != "title" && k != "deprecated" && k != "externalDocs" && k != "xml" &&
 				k != "nullable" && k != "readOnly" && k != "writeOnly" {
 				keys = append(keys, k)
@@ -448,7 +448,7 @@ func (r *ReferenceResolver) componentsEqual(a, b interface{}) bool {
 	dataB, errB := json.Marshal(normalizedB)
 	if errA != nil || errB != nil {
 		return false
-		}
+	}
 	return string(dataA) == string(dataB)
 }
 
@@ -489,9 +489,7 @@ func (r *ReferenceResolver) resolveInternalRef(ref string) (interface{}, error) 
 	if !strings.HasPrefix(ref, "#/components/") {
 		return nil, fmt.Errorf("not an internal component reference: %s", ref)
 	}
-	
+
 	path := strings.TrimPrefix(ref, "#/")
 	return r.resolveJSONPointer(r.rootDoc, "#/"+path)
 }
-
-
