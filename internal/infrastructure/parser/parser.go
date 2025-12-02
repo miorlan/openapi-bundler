@@ -2,6 +2,7 @@ package parser
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"github.com/miorlan/openapi-bundler/internal/domain"
@@ -125,6 +126,8 @@ func (p *Parser) preserveOriginalOrder(node *yaml.Node, originalNode *yaml.Node)
 
 			if key == "components" && originalValueNode.Kind == yaml.MappingNode {
 				p.preserveComponentsOrder(valueNode, originalValueNode)
+			} else if key == "paths" {
+				p.sortPathsAlphabetically(valueNode)
 			} else {
 				p.preserveOriginalOrder(valueNode, originalValueNode)
 			}
@@ -156,20 +159,20 @@ func (p *Parser) preserveComponentsOrder(node *yaml.Node, originalNode *yaml.Nod
 			break
 		}
 		originalKeyNode := originalNode.Content[i]
-		originalValueNode := originalNode.Content[i+1]
 		key := originalKeyNode.Value
 
 		if valueNode, exists := nodeMap[key]; exists {
 			newContent = append(newContent, originalKeyNode, valueNode)
 			processed[key] = true
-			p.preserveOriginalOrder(valueNode, originalValueNode)
+			// Sort component contents (schemas, parameters, etc.) alphabetically
+			p.sortMapAlphabetically(valueNode)
 		}
 	}
 
 	for key, valueNode := range nodeMap {
 		if !processed[key] {
 			newContent = append(newContent, p.createKeyNode(key), valueNode)
-			p.reorderYAMLNode(valueNode)
+			p.sortMapAlphabetically(valueNode)
 		}
 	}
 
@@ -224,6 +227,8 @@ func (p *Parser) reorderYAMLNode(node *yaml.Node) {
 
 			if key == "components" {
 				p.reorderComponentsYAMLNode(valueNode)
+			} else if key == "paths" {
+				p.sortPathsAlphabetically(valueNode)
 			} else {
 				p.reorderYAMLNode(valueNode)
 			}
@@ -268,18 +273,83 @@ func (p *Parser) reorderComponentsYAMLNode(node *yaml.Node) {
 		if valueNode, exists := nodeMap[key]; exists {
 			newContent = append(newContent, p.createKeyNode(key), valueNode)
 			processed[key] = true
-			p.reorderYAMLNode(valueNode)
+			// Sort component contents (schemas, parameters, etc.) alphabetically
+			p.sortMapAlphabetically(valueNode)
 		}
 	}
 
 	for key, valueNode := range nodeMap {
 		if !processed[key] {
 			newContent = append(newContent, p.createKeyNode(key), valueNode)
-			p.reorderYAMLNode(valueNode)
+			p.sortMapAlphabetically(valueNode)
 		}
 	}
 
 	node.Content = newContent
+}
+
+func (p *Parser) sortPathsAlphabetically(node *yaml.Node) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
+	}
+
+	type pathEntry struct {
+		key   *yaml.Node
+		value *yaml.Node
+	}
+
+	entries := make([]pathEntry, 0, len(node.Content)/2)
+	for i := 0; i < len(node.Content); i += 2 {
+		if i+1 >= len(node.Content) {
+			break
+		}
+		entries = append(entries, pathEntry{
+			key:   node.Content[i],
+			value: node.Content[i+1],
+		})
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].key.Value < entries[j].key.Value
+	})
+
+	node.Content = make([]*yaml.Node, 0, len(entries)*2)
+	for _, e := range entries {
+		node.Content = append(node.Content, e.key, e.value)
+		p.reorderYAMLNode(e.value)
+	}
+}
+
+func (p *Parser) sortMapAlphabetically(node *yaml.Node) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
+	}
+
+	type mapEntry struct {
+		key   *yaml.Node
+		value *yaml.Node
+	}
+
+	entries := make([]mapEntry, 0, len(node.Content)/2)
+	for i := 0; i < len(node.Content); i += 2 {
+		if i+1 >= len(node.Content) {
+			break
+		}
+		entries = append(entries, mapEntry{
+			key:   node.Content[i],
+			value: node.Content[i+1],
+		})
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].key.Value < entries[j].key.Value
+	})
+
+	node.Content = make([]*yaml.Node, 0, len(entries)*2)
+	for _, e := range entries {
+		node.Content = append(node.Content, e.key, e.value)
+		p.reorderYAMLNode(e.value)
+	}
 }
 
 func (p *Parser) unmarshalByContent(data []byte, v interface{}) error {
@@ -296,4 +366,3 @@ func (p *Parser) unmarshalByContent(data []byte, v interface{}) error {
 
 	return yaml.Unmarshal(data, v)
 }
-

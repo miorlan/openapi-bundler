@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/miorlan/openapi-bundler/internal/domain"
 )
@@ -28,6 +29,12 @@ type ReferenceResolver struct {
 	schemaFileToName map[string]string
 	processingComponentsIndex bool
 	currentComponentName string
+	// schemaIndex stores the mapping from schema name to its file path (from _index.yaml)
+	schemaIndex map[string]string
+	// schemaIndexBaseDir is the base directory for schema index files
+	schemaIndexBaseDir string
+	// usedSchemas tracks which schemas are actually used
+	usedSchemas map[string]bool
 }
 
 func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) domain.ReferenceResolver {
@@ -51,6 +58,8 @@ func NewReferenceResolver(fileLoader domain.FileLoader, parser domain.Parser) do
 		componentUsageCount: make(map[string]int),
 		externalRefUsageCount: make(map[string]int),
 		schemaFileToName: make(map[string]string),
+		schemaIndex: make(map[string]string),
+		usedSchemas: make(map[string]bool),
 	}
 }
 
@@ -66,6 +75,9 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 	r.componentUsageCount = make(map[string]int)
 	r.externalRefUsageCount = make(map[string]int)
 	r.schemaFileToName = make(map[string]string)
+	r.schemaIndex = make(map[string]string)
+	r.schemaIndexBaseDir = ""
+	r.usedSchemas = make(map[string]bool)
 	for _, ct := range componentTypes {
 		r.components[ct] = make(map[string]interface{})
 		r.componentCounter[ct] = 0
@@ -237,11 +249,10 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 		return err
 	}
 
-	if err := r.replaceInlineSchemasWithRefs(ctx, data); err != nil {
-		return fmt.Errorf("failed to replace inline schemas with refs: %w", err)
-	}
-
 	r.cleanNilValues(data)
+
+	// Note: We don't remove unused schemas to match swagger-cli behavior
+	// swagger-cli keeps all schemas from _index.yaml even if not directly referenced
 
 	for _, ct := range componentTypes {
 		if section, ok := components[ct].(map[string]interface{}); ok {
@@ -258,6 +269,88 @@ func (r *ReferenceResolver) ResolveAll(ctx context.Context, data map[string]inte
 	}
 
 	return nil
+}
+
+// removeUnusedSchemas removes schemas that are not referenced anywhere in the document
+func (r *ReferenceResolver) removeUnusedSchemas(data map[string]interface{}) {
+	components, ok := data["components"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	
+	schemas, ok := components["schemas"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	
+	// Collect all schema references used in paths, responses, parameters, etc. (excluding schemas section)
+	usedRefs := make(map[string]bool)
+	r.collectSchemaRefsExcludingSchemas(data, usedRefs)
+	
+	// Now recursively add schemas that are referenced by other used schemas
+	changed := true
+	for changed {
+		changed = false
+		for schemaName := range usedRefs {
+			if schema, exists := schemas[schemaName]; exists {
+				newRefs := make(map[string]bool)
+				r.collectSchemaRefsInNode(schema, newRefs)
+				for ref := range newRefs {
+					if !usedRefs[ref] {
+						usedRefs[ref] = true
+						changed = true
+					}
+				}
+			}
+		}
+	}
+	
+	// Remove schemas that are not referenced
+	for schemaName := range schemas {
+		if !usedRefs[schemaName] {
+			delete(schemas, schemaName)
+			delete(r.components["schemas"], schemaName)
+		}
+	}
+}
+
+// collectSchemaRefsExcludingSchemas collects schema refs from everywhere except components.schemas
+func (r *ReferenceResolver) collectSchemaRefsExcludingSchemas(data map[string]interface{}, usedRefs map[string]bool) {
+	for key, value := range data {
+		if key == "components" {
+			if comps, ok := value.(map[string]interface{}); ok {
+				for compKey, compValue := range comps {
+					if compKey != "schemas" {
+						r.collectSchemaRefsInNode(compValue, usedRefs)
+					}
+				}
+			}
+		} else {
+			r.collectSchemaRefsInNode(value, usedRefs)
+		}
+	}
+}
+
+// collectSchemaRefsInNode recursively collects all schema references in a node
+func (r *ReferenceResolver) collectSchemaRefsInNode(node interface{}, usedRefs map[string]bool) {
+	switch n := node.(type) {
+	case map[string]interface{}:
+		if refVal, ok := n["$ref"]; ok {
+			if refStr, ok := refVal.(string); ok {
+				if strings.HasPrefix(refStr, "#/components/schemas/") {
+					schemaName := strings.TrimPrefix(refStr, "#/components/schemas/")
+					usedRefs[schemaName] = true
+				}
+			}
+		}
+		for _, value := range n {
+			r.collectSchemaRefsInNode(value, usedRefs)
+		}
+	case []interface{}:
+		for _, item := range n {
+			r.collectSchemaRefsInNode(item, usedRefs)
+		}
+	}
 }
 
 func (r *ReferenceResolver) Resolve(ctx context.Context, ref string, basePath string, config domain.Config) (interface{}, error) {

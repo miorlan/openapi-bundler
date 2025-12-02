@@ -11,10 +11,12 @@ import (
 )
 
 func (r *ReferenceResolver) expandSectionRefs(ctx context.Context, data map[string]interface{}, baseDir string, config domain.Config) error {
-	if err := r.expandPathsSection(ctx, data, baseDir, config); err != nil {
+	// Load components first (so schemas are available when processing paths)
+	if err := r.expandComponentsSections(ctx, data, baseDir, config); err != nil {
 		return err
 	}
-	return r.expandComponentsSections(ctx, data, baseDir, config)
+	// Then process paths
+	return r.expandPathsSection(ctx, data, baseDir, config)
 }
 
 func (r *ReferenceResolver) extractRefFromValue(val interface{}) string {
@@ -115,6 +117,7 @@ func (r *ReferenceResolver) expandComponentsSections(ctx context.Context, data m
 		r.componentsBaseDir[ct] = sectionBaseDir
 		
 		if ct == "schemas" {
+			// Build schema file to name mapping for reference resolution
 			for schemaName, schemaValue := range sectionMap {
 				normalizedName := r.normalizeComponentName(schemaName)
 				
@@ -152,11 +155,11 @@ func (r *ReferenceResolver) expandComponentsSections(ctx context.Context, data m
 					}
 				}
 			}
-		}
-		
-		components[ct] = sectionMap
-		
-		if ct == "schemas" {
+			
+			// Load all schemas from index (like swagger-cli does)
+			components[ct] = sectionMap
+			
+			// Process references in all schemas
 			r.processingComponentsIndex = true
 			for schemaName, schemaValue := range sectionMap {
 				if schemaMap, ok := schemaValue.(map[string]interface{}); ok {
@@ -171,6 +174,9 @@ func (r *ReferenceResolver) expandComponentsSections(ctx context.Context, data m
 			r.processingComponentsIndex = false
 			r.currentComponentName = ""
 		} else {
+			// For non-schema components: load everything as before
+			components[ct] = sectionMap
+			
 			if err := r.replaceExternalRefs(ctx, sectionMap, sectionBaseDir, config, 0); err != nil {
 				return fmt.Errorf("failed to process references in components.%s section: %w", ct, err)
 			}
