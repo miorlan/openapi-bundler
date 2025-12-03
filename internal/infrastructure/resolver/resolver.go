@@ -398,6 +398,39 @@ func (r *Resolver) resolveRef(ctx context.Context, node *yaml.Node, ref string, 
 func (r *Resolver) resolveInternalRef(ctx context.Context, node *yaml.Node, ref string, baseDir string, config domain.Config, depth int, externalRoot *yaml.Node) error {
 	fragment := strings.TrimPrefix(ref, "#")
 
+	// If this is a schema reference, collect it and use global ref
+	if strings.HasPrefix(fragment, "/components/schemas/") {
+		schemaName := strings.TrimPrefix(fragment, "/components/schemas/")
+
+		// If already global, just use internal ref
+		if r.globalSchemaNames[schemaName] {
+			r.helper.SetRef(node, "#/components/schemas/"+schemaName)
+			return nil
+		}
+
+		// If already collected, use internal ref
+		if _, exists := r.collectedSchemas[schemaName]; exists {
+			r.helper.SetRef(node, "#/components/schemas/"+schemaName)
+			return nil
+		}
+
+		// Collect schema from external file
+		schemaContent := r.navigateToFragment(externalRoot, fragment)
+		if schemaContent != nil {
+			schemaContent = r.helper.CloneNode(schemaContent)
+			// Resolve internal refs within the schema
+			if err := r.resolveRefsWithContext(ctx, schemaContent, baseDir, config, depth+1, externalRoot); err != nil {
+				return err
+			}
+			// Store for later addition to components/schemas
+			r.collectedSchemas[schemaName] = schemaContent
+			r.collectedSchemasOrder = append(r.collectedSchemasOrder, schemaName)
+			// Convert to internal ref
+			r.helper.SetRef(node, "#/components/schemas/"+schemaName)
+			return nil
+		}
+	}
+
 	content := r.navigateToFragment(externalRoot, fragment)
 	if content == nil {
 		return fmt.Errorf("internal reference %s not found", ref)
