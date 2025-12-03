@@ -63,7 +63,7 @@ api-yaml: build
 swagger-yaml:
 	echo "запуск сборки swagger-cli"
 	@# Используем swagger-cli через npx, чтобы не требовалась глобальная установка
-	npx --yes swagger-cli bundle -o openapi/openapi.yaml openapi/index.yaml --type yaml
+	swagger-cli bundle -o openapi/openapi.yaml openapi/index.yaml --type yaml
 
 api-json: build
 	@# Используем локальный бинарный файл
@@ -71,4 +71,4 @@ api-json: build
 
 swagger-json:
 	echo "запуск сборки swagger-cli"
-	npx --yes swagger-cli bundle -o rest/rest.json rest/auth/auth.json --type json
+	swagger-cli bundle -o rest/rest.json rest/auth/auth.json

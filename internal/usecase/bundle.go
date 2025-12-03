@@ -7,8 +7,11 @@ import (
 	"strings"
 
 	"github.com/miorlan/openapi-bundler/internal/domain"
+	"github.com/miorlan/openapi-bundler/internal/infrastructure/parser"
+	"github.com/miorlan/openapi-bundler/internal/infrastructure/resolver"
 )
 
+// Config contains bundler configuration
 type Config struct {
 	Validate    bool
 	MaxFileSize int64
@@ -16,41 +19,33 @@ type Config struct {
 	Inline      bool
 }
 
+// BundleUseCase bundles OpenAPI specs using yaml.Node to preserve order
 type BundleUseCase struct {
-	fileLoader        domain.FileLoader
-	fileWriter        domain.FileWriter
-	parser            domain.Parser
-	referenceResolver domain.ReferenceResolver
-	validator         domain.Validator
+	fileLoader domain.FileLoader
+	fileWriter domain.FileWriter
+	validator  domain.Validator
 }
 
+// NewBundleUseCase creates a new BundleUseCase
 func NewBundleUseCase(
 	fileLoader domain.FileLoader,
 	fileWriter domain.FileWriter,
-	parser domain.Parser,
-	referenceResolver domain.ReferenceResolver,
 	validator domain.Validator,
 ) *BundleUseCase {
 	return &BundleUseCase{
-		fileLoader:        fileLoader,
-		fileWriter:        fileWriter,
-		parser:            parser,
-		referenceResolver: referenceResolver,
-		validator:         validator,
+		fileLoader: fileLoader,
+		fileWriter: fileWriter,
+		validator:  validator,
 	}
 }
 
+// Execute bundles the OpenAPI specification
 func (uc *BundleUseCase) Execute(ctx context.Context, inputPath, outputPath string, config Config) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 
-	inputFormat := domain.DetectFormat(inputPath)
-	outputFormat := domain.DetectFormat(outputPath)
-	if outputFormat == "" {
-		outputFormat = inputFormat
-	}
-
+	// Load input file
 	data, err := uc.fileLoader.Load(ctx, inputPath)
 	if err != nil {
 		return fmt.Errorf("failed to load input file: %w", err)
@@ -60,31 +55,43 @@ func (uc *BundleUseCase) Execute(ctx context.Context, inputPath, outputPath stri
 		return fmt.Errorf("file size %d exceeds maximum allowed size %d", len(data), config.MaxFileSize)
 	}
 
-	var root map[string]interface{}
-	if err := uc.parser.Unmarshal(data, &root, inputFormat); err != nil {
+	// Parse as yaml.Node to preserve order
+	p := parser.NewParser()
+	root, err := p.ParseFile(data)
+	if err != nil {
 		return fmt.Errorf("failed to parse input file: %w", err)
 	}
 
+	// Set output format based on output file extension
+	outputFormat := domain.DetectFormat(outputPath)
+	p.SetOutputFormat(outputFormat)
+
+	// Get base path
 	basePath := getBasePath(inputPath)
 
+	// Resolve all references
+	r := resolver.NewResolver(uc.fileLoader)
 	domainConfig := domain.Config{
 		MaxFileSize: config.MaxFileSize,
 		MaxDepth:    config.MaxDepth,
 		Inline:      config.Inline,
 	}
-	if err := uc.referenceResolver.ResolveAll(ctx, root, basePath, domainConfig); err != nil {
+	if err := r.ResolveNode(ctx, root, basePath, domainConfig); err != nil {
 		return fmt.Errorf("failed to resolve references: %w", err)
 	}
 
-	outputData, err := uc.parser.Marshal(root, outputFormat)
+	// Marshal result
+	outputData, err := p.MarshalNode(root)
 	if err != nil {
 		return fmt.Errorf("failed to marshal result: %w", err)
 	}
 
+	// Write output
 	if err := uc.fileWriter.Write(outputPath, outputData); err != nil {
 		return fmt.Errorf("failed to write output file: %w", err)
 	}
 
+	// Validate if requested
 	if config.Validate {
 		if err := uc.validator.Validate(outputPath); err != nil {
 			_ = uc.fileWriter.Write(outputPath, nil)
@@ -110,4 +117,3 @@ func getBasePath(path string) string {
 	}
 	return filepath.Dir(filepath.Clean(absPath))
 }
-

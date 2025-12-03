@@ -2,31 +2,24 @@ package domain
 
 import "context"
 
+// Config contains resolver configuration
 type Config struct {
 	MaxFileSize int64
 	MaxDepth    int
 	Inline      bool
 }
 
+// FileLoader loads files from filesystem or URL
 type FileLoader interface {
 	Load(ctx context.Context, path string) ([]byte, error)
 }
 
+// FileWriter writes files to filesystem
 type FileWriter interface {
 	Write(path string, data []byte) error
 }
 
-type Parser interface {
-	Unmarshal(data []byte, v interface{}, format FileFormat) error
-	Marshal(v interface{}, format FileFormat) ([]byte, error)
-}
-
+// Validator validates OpenAPI specifications
 type Validator interface {
 	Validate(filePath string) error
 }
-
-type ReferenceResolver interface {
-	Resolve(ctx context.Context, ref string, basePath string, config Config) (interface{}, error)
-	ResolveAll(ctx context.Context, data map[string]interface{}, basePath string, config Config) error
-}
-
