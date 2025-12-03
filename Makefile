@@ -52,23 +52,8 @@ install-man: ## Установить man pages (требуются права su
 	@mandb > /dev/null 2>&1 || true
 	@echo "✅ Man pages установлены. Используйте: man openapi-bundler"
 
-.PHONY: codegen api api-json
+.PHONY: codegen
 
-codegen: api-yaml swagger-yaml api-json swagger-json
-
-api-yaml: build
-	@# Используем локальный бинарный файл
-	@./$(BINARY_NAME) bundle -o openapi/openapi.custom.yaml openapi/index.yaml
-
-swagger-yaml:
-	echo "запуск сборки swagger-cli"
-	@# Используем swagger-cli через npx, чтобы не требовалась глобальная установка
-	swagger-cli bundle -o openapi/openapi.yaml openapi/index.yaml --type yaml
-
-api-json: build
-	@# Используем локальный бинарный файл
-	@./$(BINARY_NAME) bundle -o rest/rest.custom.json rest/auth/auth.json
-
-swagger-json:
-	echo "запуск сборки swagger-cli"
-	swagger-cli bundle -o rest/rest.json rest/auth/auth.json
+codegen: build ## Собрать OpenAPI спецификации
+	@./$(BINARY_NAME) bundle -o openapi/openapi.gen.yaml openapi/index.yaml
+	@./$(BINARY_NAME) bundle -o rest/auth/auth.gen.json rest/auth/auth.json

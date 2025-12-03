@@ -38,6 +38,10 @@ type Resolver struct {
 
 	// Deduplication
 	schemaHashToPath map[string]string
+
+	// Collected schemas from external components.json files (ordered)
+	collectedSchemas      map[string]*yaml.Node
+	collectedSchemasOrder []string
 }
 
 // NewResolver creates a new Resolver
@@ -77,6 +81,8 @@ func (r *Resolver) reset(basePath string) {
 	r.schemaFileToName = make(map[string]string)
 	r.componentFileToRef = make(map[string]string)
 	r.schemaHashToPath = make(map[string]string)
+	r.collectedSchemas = make(map[string]*yaml.Node)
+	r.collectedSchemasOrder = nil
 }
 
 // expandAndResolve expands sections and resolves references in the correct order
@@ -120,7 +126,49 @@ func (r *Resolver) expandAndResolve(ctx context.Context, node *yaml.Node, basePa
 		r.popPath()
 	}
 
+	// Phase 4: Add collected schemas to components/schemas
+	if len(r.collectedSchemas) > 0 {
+		r.addCollectedSchemasToComponents(node)
+	}
+
 	return nil
+}
+
+// addCollectedSchemasToComponents adds collected schemas to the root components/schemas
+func (r *Resolver) addCollectedSchemasToComponents(rootNode *yaml.Node) {
+	// Get or create components node
+	componentsNode := r.helper.GetMapValue(rootNode, "components")
+	if componentsNode == nil {
+		componentsNode = &yaml.Node{Kind: yaml.MappingNode}
+		rootNode.Content = append(rootNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "components"},
+			componentsNode,
+		)
+	}
+
+	// Get or create schemas node
+	schemasNode := r.helper.GetMapValue(componentsNode, "schemas")
+	if schemasNode == nil {
+		schemasNode = &yaml.Node{Kind: yaml.MappingNode}
+		componentsNode.Content = append(componentsNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "schemas"},
+			schemasNode,
+		)
+	}
+
+	// Add collected schemas in order they were discovered
+	for _, name := range r.collectedSchemasOrder {
+		schema := r.collectedSchemas[name]
+		// Check if schema already exists
+		if r.helper.GetMapValue(schemasNode, name) != nil {
+			continue
+		}
+		schemasNode.Content = append(schemasNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: name},
+			schema,
+		)
+		r.globalSchemaNames[name] = true
+	}
 }
 
 // expandComponents expands the components section
@@ -415,10 +463,30 @@ func (r *Resolver) resolveExternalRef(ctx context.Context, node *yaml.Node, ref 
 func (r *Resolver) resolveRefWithFragment(ctx context.Context, node *yaml.Node, content *yaml.Node, fragment string, refPath string, config domain.Config, depth int) error {
 	newBaseDir := filepath.Dir(refPath)
 
-	// Handle component schema references
+	// Handle component schema references - collect and convert to internal ref
 	if strings.HasPrefix(fragment, "/components/schemas/") {
 		schemaName := strings.TrimPrefix(fragment, "/components/schemas/")
+
+		// If already global, just use internal ref
 		if r.globalSchemaNames[schemaName] {
+			r.helper.SetRef(node, "#/components/schemas/"+schemaName)
+			return nil
+		}
+
+		// Collect schema from external file
+		schemaContent := r.navigateToFragment(content, fragment)
+		if schemaContent != nil {
+			schemaContent = r.helper.CloneNode(schemaContent)
+			// Resolve internal refs within the schema
+			if err := r.resolveRefsWithContext(ctx, schemaContent, newBaseDir, config, depth+1, content); err != nil {
+				return err
+			}
+			// Store for later addition to components/schemas (preserve order)
+			if _, exists := r.collectedSchemas[schemaName]; !exists {
+				r.collectedSchemas[schemaName] = schemaContent
+				r.collectedSchemasOrder = append(r.collectedSchemasOrder, schemaName)
+			}
+			// Convert to internal ref
 			r.helper.SetRef(node, "#/components/schemas/"+schemaName)
 			return nil
 		}
