@@ -483,16 +483,23 @@ func (r *Resolver) tryConvertToInternalRef(absPath string) string {
 }
 
 // tryDeduplicateSchema checks if content was already seen and uses a ref instead
+// Only deduplicates to #/components/schemas/... refs (oapi-codegen compatible)
 func (r *Resolver) tryDeduplicateSchema(node *yaml.Node, content *yaml.Node) bool {
 	hash := r.hashNode(content)
 
 	if existingPath, ok := r.schemaHashToPath[hash]; ok {
-		r.helper.SetRef(node, existingPath)
-		return true
+		// Only use refs that point to components/schemas (oapi-codegen compatible)
+		if strings.HasPrefix(existingPath, "#/components/schemas/") {
+			r.helper.SetRef(node, existingPath)
+			return true
+		}
 	}
 
+	// Only register schemas under #/components/schemas/ for deduplication
 	if currentPath := r.getCurrentJSONPointer(); currentPath != "" {
-		r.schemaHashToPath[hash] = currentPath
+		if strings.HasPrefix(currentPath, "#/components/schemas/") {
+			r.schemaHashToPath[hash] = currentPath
+		}
 	}
 
 	return false
